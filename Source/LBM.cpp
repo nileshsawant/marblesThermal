@@ -1285,7 +1285,6 @@ void LBM::initialize_is_fluid(const int lev)
             const auto if_arr = is_fluid_arrs[nbx];
 
             bool all_covered = true;
-            const amrex::IntVect nn(1);
             for (int idir = 0; idir < constants::N_MICRO_STATES; idir++) {
                 const auto& dimvec = evs[idir];
                 all_covered &= (if_arr(iv - dimvec, 0) == 1);
