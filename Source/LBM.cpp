@@ -780,6 +780,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
     amrex::Real nu = m_nu;
     amrex::Real dt = m_dts[lev];
 
+    const bool bodyIsIsothermal = m_bodyIsIsothermal;
+
     amrex::ParallelFor(
         m_f[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(
@@ -804,7 +806,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                 g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
 
-                if (m_bodyIsIsothermal) {
+                if (bodyIsIsothermal) {
                     if (is_fluid_arrs[nbx](iv, 2) == 1) {
                         g_arr(iv, q) = eq_arr_g(iv, q);
                     }
@@ -827,6 +829,9 @@ void LBM::f_to_macrodata(const int lev)
     const amrex::Real l_mesh_speed = m_mesh_speed;
     amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     amrex::Real cv = specific_gas_constant / (m_adiabaticExponent - 1.0);
+
+    const bool bodyIsIsothermal = m_bodyIsIsothermal;
+    const amrex::Real bodyTemperature = m_bodyTemperature;
 
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
@@ -898,9 +903,9 @@ void LBM::f_to_macrodata(const int lev)
                 amrex::Real temperature =
                     get_temperature(two_rho_e, rho, u, v, w, cv);
 
-                if (m_bodyIsIsothermal) {
+                if (bodyIsIsothermal) {
                     if (is_fluid_arrs[nbx](iv, 2) == 1) {
-                        temperature = m_bodyTemperature;
+                        temperature = bodyTemperature;
                     }
                 }
 
