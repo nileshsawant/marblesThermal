@@ -1040,13 +1040,41 @@ void LBM::compute_eb_forces()
                 amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> fs = {0.0};
                 if ((is_fluid_arrs[nbx](iv, 1) == 1) &&
                     (mask_arrs[nbx](iv) == 0)) {
-                    for (int q = 0; q < constants::N_MICRO_STATES; q++) {
-                        const auto& ev = evs[q];
-                        const amrex::IntVect ivr(iv + evs[bounce_dirs[q]]);
 
-                        for (int idir = 0; idir < AMREX_SPACEDIM; idir++) {
-                            fs[idir] += 2.0 * ev[idir] * f_arrs[nbx](ivr, q) *
-                                        is_fluid_arrs[nbx](ivr, 0);
+                    const auto f_arr = f_arrs[nbx];
+                    const auto is_fluid_arr = is_fluid_arrs[nbx];
+
+                    const auto& lb = amrex::lbound(f_arr);
+                    const auto& ub = amrex::ubound(f_arr);
+                    const amrex::Box fbox(
+                        amrex::IntVect(AMREX_D_DECL(lb.x, lb.y, lb.z)),
+                        amrex::IntVect(AMREX_D_DECL(ub.x, ub.y, ub.z)));
+
+                    const auto& is_lb = amrex::lbound(is_fluid_arr);
+                    const auto& is_ub = amrex::ubound(is_fluid_arr);
+                    const amrex::Box is_box(
+                        amrex::IntVect(AMREX_D_DECL(is_lb.x, is_lb.y, is_lb.z)),
+                        amrex::IntVect(
+                            AMREX_D_DECL(is_ub.x, is_ub.y, is_ub.z)));
+
+                    for (int q = 0; q < constants::N_MICRO_STATES; q++) {
+
+                        if (q >= 0 && q < constants::N_MICRO_STATES &&
+                            bounce_dirs[q] >= 0 &&
+                            bounce_dirs[q] < constants::N_MICRO_STATES) {
+
+                            const auto& ev = evs[q];
+                            const amrex::IntVect ivr(iv + evs[bounce_dirs[q]]);
+
+                            // Bounds checking. Debug
+                            if (fbox.contains(ivr) && is_box.contains(ivr)) {
+                                for (int idir = 0; idir < AMREX_SPACEDIM;
+                                     idir++) {
+                                    fs[idir] += 2.0 * ev[idir] *
+                                                f_arrs[nbx](ivr, q) *
+                                                is_fluid_arrs[nbx](ivr, 0);
+                                }
+                            }
                         }
                     }
                 }
