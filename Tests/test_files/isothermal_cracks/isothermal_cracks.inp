@@ -61,12 +61,12 @@ ic_constant.adiabatic_exponent = 1.4
 # eb2.plane_point = 0 1 0
 # eb2.plane_normal = 0.0 -1.0 0
 
-# Best quality STL - refined volume downsampled with preserved connectivity
-eb2.geom_type = "stl"
-eb2.stl_file = "/Users/nsawant/apps/nileshsawant/marblesThermal/Tests/test_files/isothermal_cracks/microstructure_nX60_nY40_nZ30_combined.stl"
-eb2.stl_scale = 1.0
-eb2.stl_reverse_normal = 0
-eb2.cover_multiple_cuts = 1
+# Use all_regular geometry with voxel crack generation
+eb2.geom_type = "all_regular"
+eb2.use_voxel_cracks = 1
+
+# Voxel crack generation from binary file
+voxel_cracks.crack_file = "microstructure_nX60_nY40_nZ30.bin"
 
 # Small cell handling for complex geometry
 eb2.small_volfrac = 1e-6
