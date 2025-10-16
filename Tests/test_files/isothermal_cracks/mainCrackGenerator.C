@@ -15,15 +15,15 @@ int main()
 // Reduced grid size for testing - change back to 2000 when you have enough RAM
 const int nX(60), nY(40), nZ(30);                     // grid
 
-std::vector<myReal> diameterVector{5,   4,   3}; // diameter of tubes
+std::vector<myReal> diameterVector{7,   6,   5}; // diameter of tubes
 
-std::vector<myReal> volumeFractions{0.1,0.2,0.3};  // relativevolume fractions of corresponding tubes
+std::vector<myReal> volumeFractions{0.2,0.3,0.4};  // relativevolume fractions of corresponding tubes
 //Need not sum up to 1, will be automatically rescaled to 1
 
 //myReal pathFluctuation = 0.1; // increase for more fluctuation, decrease for straighter paths
-myReal clusteringFactor=0.25; //reduce for more clustering, increase for less clustering
+myReal clusteringFactor=0.001; //reduce for more clustering, increase for less clustering
 
-myReal tubeVolumeFraction = 0.150; //total volume fraction of all tubes, i.e. the empty space
+myReal tubeVolumeFraction = 0.15; //total volume fraction of all tubes, i.e. the empty space
 
 bool forMARBLES_LBM_code = true; //makes tubes 0 and rest of the domain of solid space is 1. Otherwise, tubes are >0 and solid space is 0
 
@@ -107,8 +107,8 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
                 }
                 else
                 {
-                y += distributionPathFluctuation(generator);
-                z += distributionPathFluctuation(generator);
+                y += distributionPathFluctuation(generator)*(i%2);
+                z += distributionPathFluctuation(generator)*((i+1)%2);
                 }
 
                 //make y and z periodic with modulo in case they go out of bounds
@@ -187,8 +187,8 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
                 }
                 else
                 {
-                y += distributionPathFluctuation(generator);
-                z += distributionPathFluctuation(generator);
+                y += distributionPathFluctuation(generator)*(i%2);
+                z += distributionPathFluctuation(generator)*((i+1)%2);
                 }
 
                 //make y and z periodic with modulo in case they go out of bounds
