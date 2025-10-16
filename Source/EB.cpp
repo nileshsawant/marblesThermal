@@ -232,7 +232,7 @@ void generate_voxel_cracks(
     std::vector<uint16_t> crack_data = read_crack_file(crack_file, nx, ny, nz);
     
     // Initialize all cells as SOLID first
-    is_fluid.setVal(0);
+    is_fluid.setVal(1);
     
     // Copy crack data to MultiFab using CPU approach
     // Your file stores in k,j,i (z,y,x) order
