@@ -54,8 +54,9 @@ ic_constant.adiabatic_exponent = 1.4
 eb2.geom_type = "all_regular"
 eb2.use_voxel_cracks = 1
 
-# Voxel crack generation from binary file
+# Voxel crack generation from binary file (also supports .csv)
 voxel_cracks.crack_file = "microstructure_nX60_nY40_nZ30.bin"
+#voxel_cracks.crack_file = "microstructure_nX60_nY40_nZ30_r3.500000_r3.000000_r2.500000.csv"
 
 amrex.fpe_trap_invalid = 1
 amrex.fpe_trap_zero = 1
