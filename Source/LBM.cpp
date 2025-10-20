@@ -1038,14 +1038,13 @@ void LBM::compute_eb_forces()
 
                     for (int q = 0; q < constants::N_MICRO_STATES; q++) {
 
-                        if (q >= 0 && q < constants::N_MICRO_STATES &&
+                        if (q < constants::N_MICRO_STATES &&
                             bounce_dirs[q] >= 0 &&
                             bounce_dirs[q] < constants::N_MICRO_STATES) {
 
                             const auto& ev = evs[q];
                             const amrex::IntVect ivr(iv + evs[bounce_dirs[q]]);
 
-                            // Bounds checking. Debug
                             if (fbox.contains(ivr) && is_box.contains(ivr)) {
                                 for (int idir = 0; idir < AMREX_SPACEDIM;
                                      idir++) {
