@@ -1038,8 +1038,7 @@ void LBM::compute_eb_forces()
 
                     for (int q = 0; q < constants::N_MICRO_STATES; q++) {
 
-                        if (q < constants::N_MICRO_STATES &&
-                            bounce_dirs[q] >= 0 &&
+                        if (bounce_dirs[q] >= 0 &&
                             bounce_dirs[q] < constants::N_MICRO_STATES) {
 
                             const auto& ev = evs[q];
