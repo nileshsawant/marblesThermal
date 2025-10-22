@@ -6,11 +6,19 @@
 #include <fstream>
 #include <string>
 #include <filesystem>
+#include <chrono>
 
 typedef float myReal;
 
-int main()
+int main(int argc, char* argv[])
 {
+    // Get geometry seed from command line argument or use default
+    int geometrySeed = 12345; // default seed
+    if (argc > 1) {
+        geometrySeed = std::atoi(argv[1]);
+    }
+    
+    std::cout << "Using geometry seed: " << geometrySeed << std::endl;
 
 // Reduced grid size for testing - change back to 2000 when you have enough RAM
 const int nX(60), nY(40), nZ(30);                     // grid
@@ -51,7 +59,7 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
     // Use a more memory-efficient 3D structure instead of 4D vector
     std::vector<std::vector<std::vector<int>>> grid(nsZ, std::vector<std::vector<int>>(nsY, std::vector<int>(nsX, 0)));
 
-    std::default_random_engine generator;
+    std::default_random_engine generator(geometrySeed);
     std::uniform_int_distribution<int> distributionX(pX, pX + nX - 1);
     std::uniform_int_distribution<int> distributionY(pY, pY + nY - 1);
     std::uniform_int_distribution<int> distributionZ(pZ, pZ + nZ - 1);
@@ -365,9 +373,9 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
 
     std::ofstream ofile;
     std::string filename = "./results/microstructure_nX" + std::to_string(nX) + "_nY" + std::to_string(nY) + "_nZ" + std::to_string(nZ);
-for (int i = 0; i < std::min(int(radiusVector.size()),10); i++)
-    filename += "_r" + std::to_string(radiusVector[i]);
-filename += ".csv";
+//for (int i = 0; i < std::min(int(radiusVector.size()),10); i++)
+//    filename += "_r" + std::to_string(radiusVector[i]);
+filename += "_seed" + std::to_string(geometrySeed) + ".csv";
 
 ofile.open(filename);
 
@@ -383,7 +391,7 @@ for (int k = pZ; k < grid.size() - pZ; k++)
     for (int j = pY; j < grid[0].size() - pY; j++)
         for (int i = pX; i < grid[0][0].size() - pX; i++)
         {
-            output += std::to_string(i) + "," + std::to_string(j) + "," + std::to_string(k) + "," + std::to_string(grid[k][j][i]) + "\n";
+            output += std::to_string(i-pX) + "," + std::to_string(j-pY) + "," + std::to_string(k-pZ) + "," + std::to_string(grid[k][j][i]) + "\n";
         }
 }
 
@@ -394,7 +402,7 @@ ofile.close();
 std::cout << "File written: " << filename << std::endl;
 
 // Also write binary data for faster TIFF conversion
-std::string binFilename = "./results/microstructure_nX" + std::to_string(nX) + "_nY" + std::to_string(nY) + "_nZ" + std::to_string(nZ) + ".bin";
+std::string binFilename = "./results/microstructure_nX" + std::to_string(nX) + "_nY" + std::to_string(nY) + "_nZ" + std::to_string(nZ) + "_seed" + std::to_string(geometrySeed) + ".bin";
 std::ofstream binFile(binFilename, std::ios::binary);
 
 std::cout << "Writing binary file for TIFF conversion..." << std::endl;
