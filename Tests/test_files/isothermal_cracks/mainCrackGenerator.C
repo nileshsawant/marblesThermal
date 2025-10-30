@@ -341,17 +341,6 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
     std::cout << "Target porosity reached during bridging. Stopping and continuing to write to file" << std::endl;
     }
 
-    //Mark the first physical X plane as fluid
-    for (int k = 0; k < grid.size(); k++)
-        for (int j = 0; j < grid[0].size(); j++)
-            grid[k][j][pX] = 0;
-            
-    //Mark the last physical X plane as fluid
-    for (int k = 0; k < grid.size(); k++)
-        for (int j = 0; j < grid[0].size(); j++)
-            grid[k][j][grid[0][0].size() - 1 - pX] = 0;
-
-
 
     //marbles compatibility: make tubes 0 and solid space 1
     if (forMARBLES_LBM_code)
@@ -366,6 +355,17 @@ for (size_t i=0; i < volumeFractions.size(); ++i)
                 else
                     grid[k][j][i] = 1;
             }
+    
+    //Mark the first physical X plane as fluid
+    for (int k = 0; k < grid.size(); k++)
+        for (int j = 0; j < grid[0].size(); j++)
+            grid[k][j][pX] = 0;
+            
+    //Mark the last physical X plane as fluid
+    for (int k = 0; k < grid.size(); k++)
+        for (int j = 0; j < grid[0].size(); j++)
+            grid[k][j][grid[0][0].size() - 1 - pX] = 0;
+    
     }   
 
 
