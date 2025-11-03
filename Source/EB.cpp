@@ -29,8 +29,8 @@ void initialize_eb(const amrex::Geometry& geom, const int max_level)
     amrex::Vector<std::string> amrex_defaults(
         {"all_regular", "box", "cylinder", "plane", "sphere", "torus", "parser",
          "stl"});
-    if (!(std::find(amrex_defaults.begin(), amrex_defaults.end(), geom_type) !=
-          amrex_defaults.end())) {
+    if (std::find(amrex_defaults.begin(), amrex_defaults.end(), geom_type) ==
+        amrex_defaults.end()) {
         std::unique_ptr<lbm::Geometry> geometry(
             lbm::Geometry::create(geom_type));
         geometry->build(geom, max_coarsening_level);
@@ -94,7 +94,7 @@ void initialize_from_stl(
     // Check for voxel crack generation flag
     int use_voxel_cracks = 0;
     pp.query("use_voxel_cracks", use_voxel_cracks);
-    if (use_voxel_cracks) {
+    if (use_voxel_cracks != 0) {
         amrex::Print() << "Using voxel crack generation" << std::endl;
         generate_voxel_cracks(geom, is_fluid);
         return;
@@ -129,7 +129,9 @@ read_crack_file(const std::string& filename, int nx, int ny, int nz)
             std::string(e.what()));
     }
 
-    std::vector<uint16_t> crack_data(nx * ny * nz);
+    std::vector<uint16_t> crack_data(
+        static_cast<size_t>(nx) * static_cast<size_t>(ny) *
+        static_cast<size_t>(nz));
 
     if (is_csv) {
         // Parse CSV format
@@ -150,30 +152,34 @@ read_crack_file(const std::string& filename, int nx, int ny, int nz)
             size_t line_count = 0;
             while (std::getline(iss, line)) {
                 // Skip empty lines
-                if (line.empty()) continue;
+                if (line.empty()) {
+                    continue;
+                }
 
                 std::istringstream line_stream(line);
                 std::string token;
 
-                // Parse X,Y,Z,tag
-                int x, y, z, tag;
+                // Parse tokens: X, Y, Z (discard), then tag
+                int tag;
                 try {
-                    if (std::getline(line_stream, token, ','))
-                        x = std::stoi(token);
-                    else
+                    // discard X
+                    if (!std::getline(line_stream, token, ',')) {
                         continue;
-                    if (std::getline(line_stream, token, ','))
-                        y = std::stoi(token);
-                    else
+                    }
+                    // discard Y
+                    if (!std::getline(line_stream, token, ',')) {
                         continue;
-                    if (std::getline(line_stream, token, ','))
-                        z = std::stoi(token);
-                    else
+                    }
+                    // discard Z
+                    if (!std::getline(line_stream, token, ',')) {
                         continue;
-                    if (std::getline(line_stream, token, ','))
+                    }
+                    // read tag
+                    if (std::getline(line_stream, token, ',')) {
                         tag = std::stoi(token);
-                    else
+                    } else {
                         continue;
+                    }
                 } catch (const std::exception& e) {
                     // Skip malformed lines
                     continue;
@@ -184,7 +190,9 @@ read_crack_file(const std::string& filename, int nx, int ny, int nz)
                 // read sequentially The X,Y,Z coordinates are metadata - what
                 // matters is the order
 
-                if (line_count < static_cast<size_t>(nx * ny * nz)) {
+                if (line_count < static_cast<size_t>(nx) *
+                                     static_cast<size_t>(ny) *
+                                     static_cast<size_t>(nz)) {
                     crack_data[line_count] = static_cast<uint16_t>(tag);
                 }
                 line_count++;
@@ -200,12 +208,13 @@ read_crack_file(const std::string& filename, int nx, int ny, int nz)
 
     } else {
         // Parse binary format
-        size_t expected_size =
-            static_cast<size_t>(nx) * ny * nz * sizeof(uint16_t);
+        size_t expected_size = static_cast<size_t>(nx) *
+                               static_cast<size_t>(ny) *
+                               static_cast<size_t>(nz) * sizeof(uint16_t);
 
         // ReadAndBcastFile may add extra bytes, so ensure we only use what we
         // need
-        if (file_char_ptr.size() < expected_size) {
+        if (static_cast<size_t>(file_char_ptr.size()) < expected_size) {
             amrex::Abort(
                 "Binary file too small after reading. Expected: " +
                 std::to_string(expected_size) + " bytes, got: " +
@@ -243,7 +252,7 @@ void generate_voxel_cracks(
 
     // Get binary crack file path
     std::string crack_file;
-    if (!pp.query("crack_file", crack_file)) {
+    if (pp.query("crack_file", crack_file) == 0) {
         // Default filename pattern matching mainCrackGenerator.C output
         crack_file = "microstructure_nX" + std::to_string(nx) + "_nY" +
                      std::to_string(ny) + "_nZ" + std::to_string(nz) + ".bin";

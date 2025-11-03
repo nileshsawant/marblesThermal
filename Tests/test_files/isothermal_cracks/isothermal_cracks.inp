@@ -25,7 +25,7 @@ lbm.dt_outer = 1.0
 #For air flowing through 6 millimeter crack at 0.1 meters/second
 #Re = D u / nu = 6e-3 * 0.1 / 1.5e-5 = 40
 
-#Calulating nu in LB units
+#Calculating nu in LB units
 # dx = 1 = 1 millimeter. D = 6. Verify in mainCrackGenerator.C that std::vector<myReal> diameterVector{7,   6,   5}
 #nu = D u / Re
 #nu = D M a / Re
@@ -33,7 +33,7 @@ lbm.dt_outer = 1.0
 #Since we are using a compressible code for incompressible problem, Mach can be used as a free parameter
 #Setting M=0.1
 #Setting T = 1/30 . Now corresponds to physical temperature at viscosity 1.5e-5 m^2/s, i.e. T=288 K
-#Except in combustion, only ratios of temeprature matter. E.g., T = 2/30 now corresponds to 576 K
+#Except in combustion, only ratios of temeperature matter. E.g., T = 2/30 now corresponds to 576 K
 #R has be set in the code as a ratio of R_air, i.e. R=1 corresponds to 287 J/(kg K)
 #Adiabatic exponent for air, gamma=1.4  
 #nu = 6 0.1 sqrt(1.4 1 0.03333) / 40 
