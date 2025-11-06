@@ -264,26 +264,33 @@ void generate_voxel_cracks(
     // Initialize all cells as SOLID first
     is_fluid.setVal(1);
 
-    // Copy crack data to MultiFab using CPU approach
+    // Copy crack data to GPU-accessible memory for CUDA builds
+    amrex::Gpu::DeviceVector<uint16_t> d_crack_data(crack_data.size());
+    amrex::Gpu::copyAsync(
+        amrex::Gpu::hostToDevice, crack_data.begin(), crack_data.end(),
+        d_crack_data.begin());
+    amrex::Gpu::synchronize();
+
+    // Get raw pointer for device access
+    auto const* crack_ptr = d_crack_data.data();
+
+    // Copy crack data to MultiFab using GPU-compatible approach
     // Your file stores in k,j,i (z,y,x) order
     for (amrex::MFIter mfi(is_fluid); mfi.isValid(); ++mfi) {
         const amrex::Box& box = mfi.validbox();
         amrex::Array4<int> const& is_fluid_arr = is_fluid.array(mfi);
 
-        for (int k = box.smallEnd(2); k <= box.bigEnd(2); ++k) {
-            for (int j = box.smallEnd(1); j <= box.bigEnd(1); ++j) {
-                for (int i = box.smallEnd(0); i <= box.bigEnd(0); ++i) {
-                    // Convert AMReX (i,j,k) to file index (z,y,x order)
-                    int file_index = k * (nx * ny) + j * nx + i;
-                    // Your binary file: 0 = fluid (tubes), 1 = solid
-                    // AMReX m_is_fluid: 0 = solid, 1 = fluid
-                    // So we need to invert the values
-                    is_fluid_arr(i, j, k, 0) =
-                        (crack_data[file_index] == 0) ? 1 : 0;
-                }
-            }
-        }
+        amrex::ParallelFor(
+            box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                // Convert AMReX (i,j,k) to file index (z,y,x order)
+                int file_index = k * (nx * ny) + j * nx + i;
+                // Your binary file: 0 = fluid (tubes), 1 = solid
+                // AMReX m_is_fluid: 0 = solid, 1 = fluid
+                // So we need to invert the values
+                is_fluid_arr(i, j, k, 0) = (crack_ptr[file_index] == 0) ? 1 : 0;
+            });
     }
+    amrex::Gpu::synchronize();
 
     amrex::Print() << "Voxel crack generation complete" << std::endl;
 }
