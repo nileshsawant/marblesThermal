@@ -52,7 +52,7 @@ int main(int argc, char* argv[])
     for (size_t i = 0; i < diameterVector.size(); ++i)
         radiusVector[i] = diameterVector[i] / 2.0; // convert diameter to radius
 
-    const long long maxNumberOfSpheres = static_cast<long long>(nX) * nY * nZ;
+    const long maxNumberOfSpheres = static_cast<long>(nX) * nY * nZ;
     int maxRadius =
         std::ceil(*std::max_element(radiusVector.begin(), radiusVector.end()));
     const int pX(maxRadius), pY(maxRadius), pZ(maxRadius); // dummy points
@@ -73,9 +73,9 @@ int main(int argc, char* argv[])
     for (int i = 0; i < radiusVector.size(); i++)
         tags[i] = i + 1; // radiusVector[i]; //i+1;
 
-    std::vector<long long> count(radiusVector.size() + 1, 0);
-    std::vector<long long> countTarget(radiusVector.size() + 1, 0);
-    count[0] = static_cast<long long>(nX) * nY * nZ;
+    std::vector<long> count(radiusVector.size() + 1, 0);
+    std::vector<long> countTarget(radiusVector.size() + 1, 0);
+    count[0] = static_cast<long>(nX) * nY * nZ;
 
     myReal porosity =
         1.0 - tubeVolumeFraction; // porosity is 1 - tube volume fraction
@@ -83,7 +83,7 @@ int main(int argc, char* argv[])
     countTarget[0] = porosity * count[0];
     for (int i = 0; i < countTarget.size(); i++)
         countTarget[i + 1] =
-            volumeFractions[i] * static_cast<long long>(nX) * nY * nZ;
+            volumeFractions[i] * static_cast<long>(nX) * nY * nZ;
 
     // Free pass
     for (int entity = 0; entity < std::max(1, int(radiusVector.size() / 1));
@@ -91,11 +91,11 @@ int main(int argc, char* argv[])
         int y, z; // define y and z outside the loop to make tubes along x
                   // direction
 
-        long long maxIterations = static_cast<long long>(
+        long maxIterations = static_cast<long>(
             static_cast<double>(clusteringFactor) *
             static_cast<double>(maxNumberOfSpheres));
 
-        for (long long i = 0; i < maxIterations; i++) {
+        for (long i = 0; i < maxIterations; i++) {
             if (count[entity + 1] < countTarget[entity + 1]) {
 
                 int radius = std::ceil(radiusVector[entity]);
@@ -155,14 +155,14 @@ int main(int argc, char* argv[])
     }
 
     // Pass with proximity check
-    long long maxIterations = static_cast<long long>(
+    long maxIterations = static_cast<long>(
         static_cast<double>(1.0) * static_cast<double>(maxNumberOfSpheres));
 
     for (int entity = 0; entity < radiusVector.size(); entity++) {
         int y, z; // define y and z outside the loop to make tubes along x
                   // direction
 
-        for (long long i = 0; i < maxIterations; i++) {
+        for (long i = 0; i < maxIterations; i++) {
 
             if (count[entity + 1] < countTarget[entity + 1]) {
 
