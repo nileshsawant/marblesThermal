@@ -5,7 +5,7 @@ from pathlib import Path
 def import_required_modules():
     """
     Import required dependencies and fail fast with actionable guidance if they
-    are missing. The caller can install them explicitly (e.g. via `uvx pip`
+    are missing. The caller can install them explicitly (e.g. via `uv pip`
     or their preferred environment manager).
     """
 
@@ -14,7 +14,7 @@ def import_required_modules():
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
             "Missing dependency 'numpy'. Install it via your environment manager,"
-            " e.g. `uvx pip install numpy`."
+            " e.g. `uv pip install numpy`."
         ) from exc
 
     try:
@@ -22,7 +22,7 @@ def import_required_modules():
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
             "Missing dependency 'tifffile'. Install it via your environment manager,"
-            " e.g. `uvx pip install tifffile`."
+            " e.g. `uv pip install tifffile`."
         ) from exc
 
     try:

@@ -7,6 +7,7 @@
 #include <string>
 #include <filesystem>
 #include <chrono>
+#include <cstdlib>
 
 typedef float myReal;
 
@@ -407,40 +408,67 @@ int main(int argc, char* argv[])
     std::cout << "Y Column Y" << std::endl;
     std::cout << "Z Column Z" << std::endl;
 
+    auto run_with_uvx = [](const std::string& script,
+                           const std::string& uvx_packages) -> int {
+        std::string uvx_command = "uvx " + uvx_packages + " python " + script;
+        int status = std::system(uvx_command.c_str());
+        if (status != 0) {
+            std::cout << "uvx command failed (status " << status
+                      << "). Falling back to `python " << script << "`."
+                      << std::endl;
+            status = std::system(("python " + script).c_str());
+            if (status != 0) {
+                std::cout << "`python` executable not available or script "
+                             "failed (status "
+                          << status << "). Attempting `python3` fallback."
+                          << std::endl;
+                status = std::system(("python3 " + script).c_str());
+            }
+        }
+        return status;
+    };
+
+    const std::string binary_uvx_packages =
+        "--with numpy --with tifffile --with imagecodecs";
+    const std::string cad_uvx_packages =
+        "--with numpy --with tifffile --with imagecodecs --with scikit-image "
+        "--with trimesh";
+
     if (std::filesystem::exists("binaryToTiff.py")) {
-        std::cout << "Running Python TIFF conversion..." << std::endl;
-        int result = std::system("python binaryToTiff.py");
+        std::cout << "Running Python TIFF conversion (via uvx)..." << std::endl;
+        int result = run_with_uvx("binaryToTiff.py", binary_uvx_packages);
         if (result == 0) {
             std::cout << "TIFF conversion completed successfully!" << std::endl;
 
-            // Run CAD conversion if tiffToCAD.py exists
             if (std::filesystem::exists("tiffToCAD.py")) {
-                std::cout << "Running Python CAD conversion..." << std::endl;
-                int cadResult = std::system("python tiffToCAD.py");
+                std::cout << "Running Python CAD conversion (via uvx)..."
+                          << std::endl;
+                int cadResult = run_with_uvx("tiffToCAD.py", cad_uvx_packages);
                 if (cadResult == 0) {
                     std::cout << "CAD conversion completed successfully!"
                               << std::endl;
                     std::cout << "STL files saved in cad_exports/ directory"
                               << std::endl;
                 } else {
-                    std::cout << "CAD conversion failed. Run manually: python "
-                                 "tiffToCAD.py"
+                    std::cout << "CAD conversion failed. Run manually: uvx "
+                              << cad_uvx_packages << " python tiffToCAD.py"
                               << std::endl;
                 }
             } else {
                 std::cout << "tiffToCAD.py not found. To convert to CAD "
-                             "formats, run: python tiffToCAD.py"
+                             "formats, run: uvx "
+                          << cad_uvx_packages << " python tiffToCAD.py"
                           << std::endl;
             }
 
         } else {
-            std::cout << "TIFF conversion failed. Run manually: python "
-                         "binaryToTiff.py"
+            std::cout << "TIFF conversion failed. Run manually: uvx "
+                      << binary_uvx_packages << " python binaryToTiff.py"
                       << std::endl;
         }
     } else {
-        std::cout << "Python script not found. To convert to TIFF, run: python "
-                     "binaryToTiff.py"
+        std::cout << "Python script not found. To convert to TIFF, run: uvx "
+                  << binary_uvx_packages << " python binaryToTiff.py"
                   << std::endl;
     }
 

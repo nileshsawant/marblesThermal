@@ -10,21 +10,21 @@ def import_required_modules():
 
     The function raises a RuntimeError with installation guidance if a
     dependency is missing so the caller can install it explicitly (for
-    example via `uvx pip install <package>`).
+    example via `uv pip install <package>`).
     """
 
     try:
         import numpy as np  # type: ignore
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
-            "Missing dependency 'numpy'. Install it, e.g. `uvx pip install numpy`."
+            "Missing dependency 'numpy'. Install it, e.g. `uv pip install numpy`."
         ) from exc
 
     try:
         import tifffile as tf  # type: ignore
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
-            "Missing dependency 'tifffile'. Install it, e.g. `uvx pip install tifffile`."
+            "Missing dependency 'tifffile'. Install it, e.g. `uv pip install tifffile`."
         ) from exc
 
     try:
@@ -32,14 +32,14 @@ def import_required_modules():
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
             "Missing dependency 'scikit-image' (provides skimage.measure)."
-            " Install it, e.g. `uvx pip install scikit-image`."
+            " Install it, e.g. `uv pip install scikit-image`."
         ) from exc
 
     try:
         import trimesh  # type: ignore
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
-            "Missing dependency 'trimesh'. Install it, e.g. `uvx pip install trimesh`."
+            "Missing dependency 'trimesh'. Install it, e.g. `uv pip install trimesh`."
         ) from exc
 
     try:
