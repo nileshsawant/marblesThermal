@@ -46,7 +46,12 @@ static constexpr int D_Q_CORR_X_IDX = 4;
 static constexpr int D_Q_CORR_Y_IDX = 5;
 static constexpr int D_Q_CORR_Z_IDX = 6;
 
-static constexpr int N_IS_FLUID = 3;
+static constexpr int N_IS_FLUID = 4;
+// component indices for m_is_fluid (iMultiFab)
+static constexpr int IS_FLUID_IDX = 0;                 // 0 = fluid/solid
+static constexpr int EB_BOUNDARY_IDX = 1;              // 1 = EB boundary flag
+static constexpr int IS_FLUID_SIDE_IDX = 2;            // 2 = fluid-side boundary
+static constexpr int IS_FLUID_SIDE_BOUNDARY_IDX = 3;   // 3 = next layer boundary
 
 static constexpr amrex::Real ROOT3 =
     static_cast<amrex::Real>(1.732050807568877293527446341);

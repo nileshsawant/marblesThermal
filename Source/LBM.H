@@ -105,6 +105,28 @@ public:
     // Initialize is_fluid
     void initialize_is_fluid(const int lev);
 
+    // Update integer is_fluid mask from the fractional field and recompute
+    // boundary markers (steps 1 and 2 of refill_and_spill preparation).
+    // If threshold is omitted, class default m_is_fluid_fraction_threshold is used.
+    void update_is_fluid_from_fraction_and_mark(const int lev,
+                                               amrex::Real threshold = -1.0);
+
+    // Refill and spill algorithm (steps 3 and 4). This does the following
+    // (per-level):
+    //  - snapshot previous is_fluid (component 0), threshold fractional
+    //    field into integer mask, recompute boundary markers (EB and side
+    //    boundaries), then
+    //  - SPILL: for cells that became solid, distribute their m_f/m_g
+    //    populations to neighboring secondary-boundary (component 3)
+    //    cells into matching population components using stencil weights
+    //    (fallback to component 2 if needed). Donors are zeroed.
+    //  - REFILL: for cells that became fluid, collect immediate boundary
+    //    neighbors (component 2) and compute weighted sums to fill each
+    //    population component; subtract the same weighted amounts from
+    //    donor neighbors so overall conservation holds.
+    // If threshold is negative, the class default is used.
+    void refill_and_spill(const int lev, amrex::Real threshold = -1.0);
+
     // Initialize masks
     void initialize_mask(const int lev);
 
@@ -214,6 +236,7 @@ private:
     amrex::Vector<std::string> m_microdata_g_varnames;
     amrex::Vector<std::string> m_deriveddata_varnames;
     amrex::Vector<std::string> m_idata_varnames;
+    amrex::Vector<std::string> m_fracdata_varnames;
 
     // array of multifabs to store the solution at each level of refinement
     amrex::Vector<amrex::MultiFab> m_macrodata;
@@ -225,7 +248,10 @@ private:
     amrex::Vector<amrex::iMultiFab> m_is_fluid;
     amrex::Vector<amrex::MultiFab> m_plt_mf;
     amrex::Vector<amrex::iMultiFab> m_mask;
-
+    
+    //non-integer mask to identify fluid cells. Will be moved with advection equation for moving solid body
+    amrex::Vector<amrex::MultiFab> m_is_fluid_fraction;
+ 
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;
     const int m_eq_nghost = 0;
@@ -303,6 +329,9 @@ private:
 
     // Initial temperature.
     amrex::Real m_initialTemperature = 1.0 / 3.0;
+
+    // threshold for converting fractional mask into integer is_fluid
+    amrex::Real m_is_fluid_fraction_threshold = 0.5;
 
     // Body is isothermal.
     bool m_bodyIsIsothermal = false;

@@ -61,6 +61,10 @@ LBM::LBM()
     m_idata_varnames.push_back("is_fluid");
     m_idata_varnames.push_back("eb_boundary");
     m_idata_varnames.push_back("eb_fluid_boundary");
+    // placeholder name for the new 4th component of m_is_fluid
+    m_idata_varnames.push_back("eb_fluid_boundary_2");
+    // fractional field is stored separately as a Real MultiFab
+    m_fracdata_varnames.push_back("is_fluid_fraction");
     for (const auto& vname : m_macrodata_varnames) {
         m_lbm_varnames.push_back(vname);
     }
@@ -79,6 +83,9 @@ LBM::LBM()
         }
     }
     for (const auto& vname : m_idata_varnames) {
+        m_lbm_varnames.push_back(vname);
+    }
+    for (const auto& vname : m_fracdata_varnames) {
         m_lbm_varnames.push_back(vname);
     }
 
@@ -101,6 +108,7 @@ LBM::LBM()
     m_eq_g.resize(nlevs_max);
     m_derived.resize(nlevs_max);
     m_is_fluid.resize(nlevs_max);
+    m_is_fluid_fraction.resize(nlevs_max);
     m_plt_mf.resize(nlevs_max);
     m_mask.resize(nlevs_max);
 
@@ -289,6 +297,9 @@ void LBM::read_parameters()
 
         pp.query("body_is_isothermal", m_bodyIsIsothermal);
         pp.query("body_temperature", m_bodyTemperature);
+
+    // threshold for converting fractional mask to integer is_fluid
+    pp.query("is_fluid_fraction_threshold", m_is_fluid_fraction_threshold);
 
         pp.query("adiabatic_exponent", m_adiabaticExponent);
         pp.query("mean_molecular_mass", m_m_bar);
@@ -583,7 +594,7 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto& ev = evs[q];
             const amrex::IntVect ivn(iv + ev);
-            if (is_fluid_arrs[nbx](iv, 0) == 1) {
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                 const auto f_arr = f_arrs[nbx];
                 const auto fs_arr = fs_arrs[nbx];
                 const auto& lb = amrex::lbound(f_arr);
@@ -592,7 +603,7 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
                     amrex::IntVect(AMREX_D_DECL(lb.x, lb.y, lb.z)),
                     amrex::IntVect(AMREX_D_DECL(ub.x, ub.y, ub.z)));
                 if (fbox.contains(ivn)) {
-                    if (is_fluid_arrs[nbx](ivn, 0) != 0) {
+                    if (is_fluid_arrs[nbx](ivn, lbm::constants::IS_FLUID_IDX) != 0) {
                         fs_arr(ivn, q) = f_arr(iv, q);
                     } else {
                         fs_arr(iv, bounce_dirs[q]) = f_arr(iv, q);
@@ -653,7 +664,7 @@ void LBM::macrodata_to_equilibrium(const int lev)
             int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k),
             int q) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
-            if (is_fluid_arrs[nbx](iv, 0) == 1) {
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
 
                 const auto md_arr = md_arrs[nbx];
                 const auto eq_arr = eq_arrs[nbx];
@@ -788,7 +799,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
             int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k),
             int q) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
-            if (is_fluid_arrs[nbx](iv, 0) == 1) {
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                 const auto f_arr = f_arrs[nbx];
                 const auto eq_arr = eq_arrs[nbx];
                 const auto md_arr = md_arrs[nbx];
@@ -807,7 +818,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
 
                 if (body_is_isothermal) {
-                    if (is_fluid_arrs[nbx](iv, 2) == 1) {
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
                         g_arr(iv, q) = eq_arr_g(iv, q);
                     }
                 }
@@ -840,7 +851,7 @@ void LBM::f_to_macrodata(const int lev)
         [=] AMREX_GPU_DEVICE(
             int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
-            if (is_fluid_arrs[nbx](iv, 0) == 1) {
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
 
                 const auto f_arr = f_arrs[nbx];
                 const auto g_arr = g_arrs[nbx];
@@ -904,7 +915,7 @@ void LBM::f_to_macrodata(const int lev)
                     get_temperature(two_rho_e, rho, u, v, w, cv);
 
                 if (body_is_isothermal) {
-                    if (is_fluid_arrs[nbx](iv, 2) == 1) {
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
                         temperature = body_temperature;
                     }
                 }
@@ -946,7 +957,7 @@ void LBM::compute_derived(const int lev)
             const auto d_arr = d_arrs[nbx];
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
 
-            if (if_arr(iv, 0) == 1) {
+            if (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 1) {
                 const amrex::Real vx = gradient(
                     0, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr);
                 const amrex::Real wx = gradient(
@@ -996,7 +1007,7 @@ void LBM::compute_q_corrections(const int lev)
             const auto d_arr = d_arrs[nbx];
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
 
-            if (if_arr(iv, 0) == 1) {
+            if (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 1) {
                 d_arr(iv, constants::D_Q_CORR_X_IDX) = gradient(
                     0, constants::Q_CORR_X_IDX, iv, idx, dbox, if_arr, md_arr);
                 d_arr(iv, constants::D_Q_CORR_Y_IDX) = gradient(
@@ -1038,7 +1049,7 @@ void LBM::compute_eb_forces()
                     amrex::Real, amrex::Real, amrex::Real)> {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> fs = {0.0};
-                if ((is_fluid_arrs[nbx](iv, 1) == 1) &&
+                if ((is_fluid_arrs[nbx](iv, lbm::constants::EB_BOUNDARY_IDX) == 1) &&
                     (mask_arrs[nbx](iv) == 0)) {
                     for (int q = 0; q < constants::N_MICRO_STATES; q++) {
                         const auto& ev = evs[q];
@@ -1046,7 +1057,7 @@ void LBM::compute_eb_forces()
 
                         for (int idir = 0; idir < AMREX_SPACEDIM; idir++) {
                             fs[idir] += 2.0 * ev[idir] * f_arrs[nbx](ivr, q) *
-                                        is_fluid_arrs[nbx](ivr, 0);
+                                        is_fluid_arrs[nbx](ivr, lbm::constants::IS_FLUID_IDX);
                         }
                     }
                 }
@@ -1128,6 +1139,7 @@ void LBM::MakeNewLevelFromCoarse(
         *(m_factory[lev]));
     m_is_fluid[lev].define(
         ba, dm, m_is_fluid[lev - 1].nComp(), m_is_fluid[lev - 1].nGrow());
+    m_is_fluid_fraction[lev].define(ba, dm, 1, m_is_fluid_fraction[lev - 1].nGrow());
     m_eq[lev].define(
         ba, dm, m_eq[lev - 1].nComp(), m_eq[lev - 1].nGrow(), amrex::MFInfo(),
         *(m_factory[lev]));
@@ -1144,6 +1156,18 @@ void LBM::MakeNewLevelFromCoarse(
     m_ts_old[lev] = constants::LOW_NUM;
 
     initialize_is_fluid(lev);
+    // initialize fractional field from integer mask (component 0)
+    {
+        auto const& if_arrs = m_is_fluid[lev].const_arrays();
+        auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                frac_arrs[nbx](i, j, k, 0) = static_cast<amrex::Real>(
+                    if_arrs[nbx](i, j, k, 0));
+            });
+        amrex::Gpu::synchronize();
+    }
     initialize_mask(lev);
     m_fillpatch_op->fillpatch_from_coarse(lev, time, m_f[lev]);
 
@@ -1187,6 +1211,7 @@ void LBM::MakeNewLevelFromScratch(
         ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
     m_is_fluid[lev].define(ba, dm, constants::N_IS_FLUID, m_f[lev].nGrow());
+    m_is_fluid_fraction[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     m_eq[lev].define(
         ba, dm, constants::N_MICRO_STATES, m_eq_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
@@ -1203,6 +1228,18 @@ void LBM::MakeNewLevelFromScratch(
 
     // Initialize the data
     initialize_is_fluid(lev);
+    // initialize fractional field from integer mask (component 0)
+    {
+        auto const& if_arrs = m_is_fluid[lev].const_arrays();
+        auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                frac_arrs[nbx](i, j, k, 0) = static_cast<amrex::Real>(
+                    if_arrs[nbx](i, j, k, 0));
+            });
+        amrex::Gpu::synchronize();
+    }
     initialize_mask(lev);
     initialize_f(lev);
     m_macrodata[lev].setVal(0.0);
@@ -1243,11 +1280,13 @@ void LBM::initialize_is_fluid(const int lev)
     amrex::ParallelFor(
         m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-            is_fluid_arrs[nbx](i, j, k, 0) =
+            is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                 !(flag_arrs[nbx](i, j, k).isRegular() ||
                   flag_arrs[nbx](i, j, k).isSingleValued())
                     ? 0
                     : 1;
+                        // ensure new 4th component is initialized to 0
+                        //is_fluid_arrs[nbx](i, j, k, 3) = 0;
         });
 
     initialize_from_stl(Geom(lev), m_is_fluid[lev]);
@@ -1267,15 +1306,15 @@ void LBM::initialize_is_fluid(const int lev)
             for (int idir = 0; idir < AMREX_SPACEDIM; idir++) {
                 const auto dimvec = amrex::IntVect::TheDimensionVector(idir);
                 for (int n = 1; n <= nn[idir]; n++) {
-                    all_covered &= (if_arr(iv - n * dimvec, 0) == 0) &&
-                                   (if_arr(iv + n * dimvec, 0) == 0);
+                    all_covered &= (if_arr(iv - n * dimvec, lbm::constants::IS_FLUID_IDX) == 0) &&
+                                   (if_arr(iv + n * dimvec, lbm::constants::IS_FLUID_IDX) == 0);
                 }
             }
 
-            if ((all_covered) || (if_arr(iv, 0) == 1)) {
-                if_arr(iv, 1) = 0;
+            if ((all_covered) || (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 1)) {
+                if_arr(iv, lbm::constants::EB_BOUNDARY_IDX) = 0;
             } else {
-                if_arr(iv, 1) = 1;
+                if_arr(iv, lbm::constants::EB_BOUNDARY_IDX) = 1;
             }
         });
 
@@ -1292,16 +1331,519 @@ void LBM::initialize_is_fluid(const int lev)
             bool all_covered = true;
             for (int idir = 0; idir < constants::N_MICRO_STATES; idir++) {
                 const auto& dimvec = evs[idir];
-                all_covered &= (if_arr(iv - dimvec, 0) == 1);
+                all_covered &= (if_arr(iv - dimvec, lbm::constants::IS_FLUID_IDX) == 1);
             }
 
-            if ((all_covered) || (if_arr(iv, 0) == 0)) {
-                if_arr(iv, 2) = 0;
+            if ((all_covered) || (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 0)) {
+                if_arr(iv, lbm::constants::IS_FLUID_SIDE_IDX) = 0;
             } else {
-                if_arr(iv, 2) = 1;
+                if_arr(iv, lbm::constants::IS_FLUID_SIDE_IDX) = 1;
             }
         });
 
+    // Compute the boundary cells of the fluid side boundary
+    amrex::ParallelFor(
+        m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
+        [=] AMREX_GPU_DEVICE(
+            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            const auto if_arr = is_fluid_arrs[nbx];
+
+            // mark cells that are fluid, not already marked as side boundary
+            // (component 2), but that see at least one neighbor with comp 2
+            constexpr int IS_FLUID = lbm::constants::IS_FLUID_IDX;
+            constexpr int IS_FLUID_SIDE = lbm::constants::IS_FLUID_SIDE_IDX;
+            constexpr int IS_FLUID_SIDE_BOUNDARY =
+                lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX;
+
+            bool sees_side = false;
+            for (int idir = 0; idir < constants::N_MICRO_STATES; ++idir) {
+                const auto& dimvec = evs[idir];
+                if (if_arr(iv - dimvec, IS_FLUID_SIDE) == 1) {
+                    sees_side = true;
+                    break;
+                }
+            }
+
+            if ((if_arr(iv, IS_FLUID) == 1) && (if_arr(iv, IS_FLUID_SIDE) == 0) &&
+                sees_side) {
+                if_arr(iv, IS_FLUID_SIDE_BOUNDARY) = 1;
+            } else {
+                if_arr(iv, IS_FLUID_SIDE_BOUNDARY) = 0;
+            }
+        });
+  
+
+    m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+}
+
+void LBM::update_is_fluid_from_fraction_and_mark(const int lev, amrex::Real threshold)
+{
+    BL_PROFILE("LBM::update_is_fluid_from_fraction_and_mark()");
+
+    if (threshold < 0.0) threshold = m_is_fluid_fraction_threshold;
+
+    // Step 1: threshold fractional field into integer mask component 0
+    {
+        auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        auto const& isf_arrs = m_is_fluid[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::Real val = frac_arrs[nbx](i, j, k, 0);
+                isf_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
+                    (val >= threshold) ? 1 : 0;
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // After modifying the integer mask, recompute the boundary markers
+    m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+
+    // Compute EB_BOUNDARY similar to initialize_is_fluid
+    {
+        auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                const auto if_arr = is_fluid_arrs[nbx];
+
+                bool all_covered = true;
+                const amrex::IntVect nn(1);
+                for (int idir = 0; idir < AMREX_SPACEDIM; idir++) {
+                    const auto dimvec = amrex::IntVect::TheDimensionVector(idir);
+                    for (int n = 1; n <= nn[idir]; n++) {
+                        all_covered &= (if_arr(iv - n * dimvec, lbm::constants::IS_FLUID_IDX) == 0) &&
+                                       (if_arr(iv + n * dimvec, lbm::constants::IS_FLUID_IDX) == 0);
+                    }
+                }
+
+                if ((all_covered) || (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 1)) {
+                    if_arr(iv, lbm::constants::EB_BOUNDARY_IDX) = 0;
+                } else {
+                    if_arr(iv, lbm::constants::EB_BOUNDARY_IDX) = 1;
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // Compute IS_FLUID_SIDE
+    {
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+        auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                const auto if_arr = is_fluid_arrs[nbx];
+
+                bool all_covered = true;
+                for (int idir = 0; idir < constants::N_MICRO_STATES; idir++) {
+                    const auto& dimvec = evs[idir];
+                    all_covered &= (if_arr(iv - dimvec, lbm::constants::IS_FLUID_IDX) == 1);
+                }
+
+                if ((all_covered) || (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 0)) {
+                    if_arr(iv, lbm::constants::IS_FLUID_SIDE_IDX) = 0;
+                } else {
+                    if_arr(iv, lbm::constants::IS_FLUID_SIDE_IDX) = 1;
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // Compute IS_FLUID_SIDE_BOUNDARY
+    {
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+        auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                const auto if_arr = is_fluid_arrs[nbx];
+
+                constexpr int IS_FLUID = lbm::constants::IS_FLUID_IDX;
+                constexpr int IS_FLUID_SIDE = lbm::constants::IS_FLUID_SIDE_IDX;
+                constexpr int IS_FLUID_SIDE_BOUNDARY =
+                    lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX;
+
+                bool sees_side = false;
+                for (int idir = 0; idir < constants::N_MICRO_STATES; ++idir) {
+                    const auto& dimvec = evs[idir];
+                    if (if_arr(iv - dimvec, IS_FLUID_SIDE) == 1) {
+                        sees_side = true;
+                        break;
+                    }
+                }
+
+                if ((if_arr(iv, IS_FLUID) == 1) && (if_arr(iv, IS_FLUID_SIDE) == 0) &&
+                    sees_side) {
+                    if_arr(iv, IS_FLUID_SIDE_BOUNDARY) = 1;
+                } else {
+                    if_arr(iv, IS_FLUID_SIDE_BOUNDARY) = 0;
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+}
+
+void LBM::refill_and_spill(const int lev, amrex::Real threshold)
+{
+    BL_PROFILE("LBM::refill_and_spill()");
+
+    if (threshold < 0.0) threshold = m_is_fluid_fraction_threshold;
+
+    // 0) Ensure ghost cells of data we read are filled
+    m_is_fluid_fraction[lev].FillBoundary(Geom(lev).periodicity());
+    m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+    m_f[lev].FillBoundary(Geom(lev).periodicity());
+    m_g[lev].FillBoundary(Geom(lev).periodicity());
+
+    // 1) Snapshot old integer mask (component 0) to detect transitions
+    amrex::iMultiFab old_mask(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 0);
+    amrex::iMultiFab::Copy(old_mask, m_is_fluid[lev], lbm::constants::IS_FLUID_IDX, 0, 1, 0);
+
+    // 2) Threshold fractional -> integer (component 0) and recompute markers
+    update_is_fluid_from_fraction_and_mark(lev, threshold);
+
+    // 3) Compute transition masks: newly solid (was fluid, now solid) and
+    // newly fluid (was solid, now fluid)
+    amrex::iMultiFab newly_solid(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 0);
+    amrex::iMultiFab newly_fluid(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 0);
+
+    {
+        auto const& old_mask_arrs = old_mask.const_arrays();
+        auto const& new_mask_arrs = m_is_fluid[lev].const_arrays();
+        auto const& newly_solid_arrs = newly_solid.arrays();
+        // capture arrays by reference to avoid copying iMultiFab objects into the lambda
+        amrex::ParallelFor(newly_solid, newly_solid.nGrowVect(), 1,
+                           [&old_mask_arrs, &new_mask_arrs, &newly_solid_arrs]
+                               AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                                   const int oldv = old_mask_arrs[nbx](i, j, k, 0);
+                                   const int newv = new_mask_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
+                                   newly_solid_arrs[nbx](i, j, k, n) = (oldv == 1 && newv == 0) ? 1 : 0;
+                               });
+
+        auto const& newly_fluid_arrs = newly_fluid.arrays();
+        amrex::ParallelFor(newly_fluid, newly_fluid.nGrowVect(), 1,
+                           [&old_mask_arrs, &new_mask_arrs, &newly_fluid_arrs]
+                               AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                                   const int oldv = old_mask_arrs[nbx](i, j, k, 0);
+                                   const int newv = new_mask_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
+                                   newly_fluid_arrs[nbx](i, j, k, n) = (oldv == 0 && newv == 1) ? 1 : 0;
+                               });
+    }
+    amrex::Gpu::synchronize();
+
+    // 4) Prepare temporary accumulators for atomic updates
+    // delta_recv: amounts to add to receivers (per-population)
+    // delta_take: amounts to subtract from donors (per-population)
+    amrex::MultiFab delta_recv(
+        m_f[lev].boxArray(), m_f[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    amrex::MultiFab delta_take(
+        m_f[lev].boxArray(), m_f[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    amrex::MultiFab delta_recv_g(
+        m_g[lev].boxArray(), m_g[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    amrex::MultiFab delta_take_g(
+        m_g[lev].boxArray(), m_g[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    delta_recv.setVal(0.0);
+    delta_take.setVal(0.0);
+    delta_recv_g.setVal(0.0);
+    delta_take_g.setVal(0.0);
+
+    const stencil::Stencil stencil;
+    const auto& evs = stencil.evs;
+    const auto& weights = stencil.weights;
+
+    // Helper lambdas for array access inside kernels (to keep code readable)
+
+    // 5) SPILL: donors are cells that became solid (newly_solid==1). For
+    // each donor, compute donor_total per-population and distribute to
+    // neighboring secondary boundary cells (component 3) into matching
+    // population components weighted by stencil weights. If no comp-3
+    // neighbors exist, fallback to component 2 neighbors.
+    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+        auto const& newly_solid_arrs = newly_solid.const_arrays();
+        auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+        auto const& f_arrs = m_f[lev].arrays();
+        auto const& g_arrs = m_g[lev].arrays();
+    auto const& delta_recv_arrs = delta_recv.arrays();
+    auto const& delta_take_arrs = delta_take.arrays();
+    auto const& delta_recv_g_arrs = delta_recv_g.arrays();
+    auto const& delta_take_g_arrs = delta_take_g.arrays();
+
+        amrex::ParallelFor(
+            m_f[lev], m_f[lev].nGrowVect(), 1,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                if (newly_solid_arrs[nbx](i, j, k, 0) == 1) {
+                    // donor total for population q
+                    const amrex::Real donor_val_f = f_arrs[nbx](i, j, k, q);
+                    const amrex::Real donor_val_g = g_arrs[nbx](i, j, k, q);
+
+                    if (donor_val_f == 0.0 && donor_val_g == 0.0) return;
+
+                    // find candidate neighbor cells (component 3 preferred)
+                    amrex::Real wsum = 0.0;
+                    // Count and collect neighbor offsets that match component 3
+                    amrex::GpuArray<int, constants::N_MICRO_STATES> valid_nb{};
+                    int valid_count = 0;
+                    for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                        // Simple bounds check: we rely on ghost cells being present
+                        // and FillBoundary having been called earlier.
+                        const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX);
+                        if (nb_mvalue == 1) {
+                            valid_nb[valid_count++] = nq;
+                            wsum += weights[nq];
+                        }
+                    }
+
+                    // fallback to side neighbors (component 2) if no comp-3 found
+                    if (valid_count == 0) {
+                        for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                            const auto off = evs[nq];
+                            const int ni = i + off[0];
+                            const int nj = j + off[1];
+                            const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                            const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_IDX);
+                            if (nb_mvalue == 1) {
+                                valid_nb[valid_count++] = nq;
+                                wsum += weights[nq];
+                            }
+                        }
+                    }
+
+                    if (valid_count == 0) {
+                        // No neighbors to accept spill; conservatively drop mass
+                        // (or optionally retain in donor). For now we drop.
+                        return;
+                    }
+
+                    // Distribute donor population q to matching component q of neighbors
+                    for (int vi = 0; vi < valid_count; ++vi) {
+                        const int nq = valid_nb[vi];
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+
+                        const amrex::Real frac = (wsum > 0.0) ? (weights[nq] / wsum) : (1.0 / valid_count);
+
+                        // atomic add into delta_recv at neighbor for population q
+                        amrex::Gpu::Atomic::Add(&delta_recv_arrs[nbx](ni, nj, nk, q), static_cast<amrex::Real>(donor_val_f * frac));
+                        amrex::Gpu::Atomic::Add(&delta_recv_g_arrs[nbx](ni, nj, nk, q), static_cast<amrex::Real>(donor_val_g * frac));
+
+                        // track negative change on donor (we'll zero donor later)
+                        amrex::Gpu::Atomic::Add(&delta_take_arrs[nbx](i, j, k, q), static_cast<amrex::Real>(donor_val_f * frac));
+                        amrex::Gpu::Atomic::Add(&delta_take_g_arrs[nbx](i, j, k, q), static_cast<amrex::Real>(donor_val_g * frac));
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // Apply received deltas and zero donors' populations (for SPILL)
+    // We collected separate received deltas for the f and g distributions
+    // (delta_recv and delta_recv_g) in the SPILL loop above. Apply them
+    // now. Donor cells are then zeroed because the spill distribution is
+    // intended to move the donor's entire per-population value to nearby
+    // acceptors (the delta_take sums were constructed to equal the donor
+    // value), so zeroing is conservative here.
+    amrex::MultiFab::Add(m_f[lev], delta_recv, 0, 0, constants::N_MICRO_STATES, 0);
+    amrex::MultiFab::Add(m_g[lev], delta_recv_g, 0, 0, constants::N_MICRO_STATES, 0);
+    // Zero donors: remove the original donor contributions where newly_solid==1
+    {
+        auto const& newly_solid_arrs = newly_solid.const_arrays();
+        auto const& f_arrs = m_f[lev].arrays();
+        auto const& g_arrs = m_g[lev].arrays();
+        amrex::ParallelFor(
+            m_f[lev], m_f[lev].nGrowVect(), 1,
+            [&newly_solid_arrs, &f_arrs, &g_arrs]
+                AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                    if (newly_solid_arrs[nbx](i, j, k, 0) == 1) {
+                        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                            f_arrs[nbx](i, j, k, q) = 0.0;
+                            g_arrs[nbx](i, j, k, q) = 0.0;
+                        }
+                    }
+                });
+    }
+    amrex::Gpu::synchronize();
+
+    // 6) REFILL: newly fluid cells draw mass from immediate side neighbors
+    // (component 2). For each new fluid cell, compute weighted sum of
+    // neighbor populations and set matching components; subtract same
+    // weighted amounts from neighbors (conservation).
+    amrex::MultiFab delta_take_refill(
+        m_f[lev].boxArray(), m_f[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    delta_take_refill.setVal(0.0);
+
+    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+        auto const& newly_fluid_arrs = newly_fluid.const_arrays();
+        auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+        auto const& f_arrs = m_f[lev].arrays();
+        auto const& delta_take_refill_arrs = delta_take_refill.arrays();
+
+        amrex::ParallelFor(
+            m_f[lev], m_f[lev].nGrowVect(), 1,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                if (newly_fluid_arrs[nbx](i, j, k, 0) == 1) {
+                    // collect immediate side neighbors (component 2)
+                    amrex::Real wsum = 0.0;
+                    amrex::Real accum = 0.0;
+                    amrex::GpuArray<int, constants::N_MICRO_STATES> valid_nb{};
+                    int valid_count = 0;
+                    for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                        const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_IDX);
+                        if (nb_mvalue == 1) {
+                            valid_nb[valid_count++] = nq;
+                            wsum += weights[nq];
+                            accum += f_arrs[nbx](ni, nj, nk, q) * weights[nq];
+                        }
+                    }
+
+                    if (valid_count == 0) {
+                        // fallback: try secondary side neighbors
+                        for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                            const auto off = evs[nq];
+                            const int ni = i + off[0];
+                            const int nj = j + off[1];
+                            const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                            const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX);
+                            if (nb_mvalue == 1) {
+                                valid_nb[valid_count++] = nq;
+                                wsum += weights[nq];
+                                accum += f_arrs[nbx](ni, nj, nk, q) * weights[nq];
+                            }
+                        }
+                    }
+
+                    if (valid_count == 0) {
+                        // nothing to refill from
+                        return;
+                    }
+
+                    // Set the population q of the new fluid cell to the normalized weighted sum
+                    const amrex::Real refill_amount = (wsum > 0.0) ? (accum / wsum) : (accum / static_cast<amrex::Real>(valid_count));
+                    f_arrs[nbx](i, j, k, q) = refill_amount;
+
+                    // Subtract corresponding shares from neighbors into delta_take_refill
+                    for (int vi = 0; vi < valid_count; ++vi) {
+                        const int nq = valid_nb[vi];
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                        const amrex::Real frac = (wsum > 0.0) ? (weights[nq] / wsum) : (1.0 / valid_count);
+                        amrex::Gpu::Atomic::Add(&delta_take_refill_arrs[nbx](ni, nj, nk, q), static_cast<amrex::Real>(refill_amount * frac));
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // Apply neighbor subtractions for f
+    amrex::MultiFab::Subtract(m_f[lev], delta_take_refill, 0, 0, constants::N_MICRO_STATES, 0);
+
+    // Compute REFILL for m_g independently (same stencil-weighted logic but
+    // operating on the g distribution) so energy-like moments are filled
+    // consistently with their own neighbor weights.
+    amrex::MultiFab delta_take_refill_g(
+        m_g[lev].boxArray(), m_g[lev].DistributionMap(), constants::N_MICRO_STATES, 0);
+    delta_take_refill_g.setVal(0.0);
+
+    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+        auto const& newly_fluid_arrs = newly_fluid.const_arrays();
+        auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+        auto const& g_arrs = m_g[lev].arrays();
+        auto const& delta_take_refill_g_arrs = delta_take_refill_g.arrays();
+
+        amrex::ParallelFor(
+            m_g[lev], m_g[lev].nGrowVect(), 1,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                if (newly_fluid_arrs[nbx](i, j, k, 0) == 1) {
+                    amrex::Real wsum = 0.0;
+                    amrex::Real accum = 0.0;
+                    amrex::GpuArray<int, constants::N_MICRO_STATES> valid_nb{};
+                    int valid_count = 0;
+                    for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                        const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_IDX);
+                        if (nb_mvalue == 1) {
+                            valid_nb[valid_count++] = nq;
+                            wsum += weights[nq];
+                            accum += g_arrs[nbx](ni, nj, nk, q) * weights[nq];
+                        }
+                    }
+
+                    if (valid_count == 0) {
+                        for (int nq = 0; nq < constants::N_MICRO_STATES; ++nq) {
+                            const auto off = evs[nq];
+                            const int ni = i + off[0];
+                            const int nj = j + off[1];
+                            const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                            const int nb_mvalue = is_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX);
+                            if (nb_mvalue == 1) {
+                                valid_nb[valid_count++] = nq;
+                                wsum += weights[nq];
+                                accum += g_arrs[nbx](ni, nj, nk, q) * weights[nq];
+                            }
+                        }
+                    }
+
+                    if (valid_count == 0) {
+                        return;
+                    }
+
+                    const amrex::Real refill_amount_g = (wsum > 0.0) ? (accum / wsum) : (accum / static_cast<amrex::Real>(valid_count));
+                    g_arrs[nbx](i, j, k, q) = refill_amount_g;
+
+                    for (int vi = 0; vi < valid_count; ++vi) {
+                        const int nq = valid_nb[vi];
+                        const auto off = evs[nq];
+                        const int ni = i + off[0];
+                        const int nj = j + off[1];
+                        const int nk = AMREX_D_PICK(k + off[2], k + off[2], k + off[2]);
+                        const amrex::Real frac = (wsum > 0.0) ? (weights[nq] / wsum) : (1.0 / valid_count);
+                        amrex::Gpu::Atomic::Add(&delta_take_refill_g_arrs[nbx](ni, nj, nk, q), static_cast<amrex::Real>(refill_amount_g * frac));
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // Apply neighbor subtractions for g
+    amrex::MultiFab::Subtract(m_g[lev], delta_take_refill_g, 0, 0, constants::N_MICRO_STATES, 0);
+
+    // The g distribution was handled independently above: spill contributions
+    // accumulated into delta_recv_g and refill contributions into
+    // delta_take_refill_g. We apply the neighbor subtractions for g below
+    // to ensure conservation of g (analogous to the f distribution).
+
+    // Finalize
+    m_f[lev].FillBoundary(Geom(lev).periodicity());
+    m_g[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
 }
 
@@ -1331,7 +1873,7 @@ void LBM::fill_f_inside_eb(const int lev)
     amrex::ParallelFor(
         m_f[lev], m_f[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
-            if (is_fluid_arrs[nbx](i, j, k, 0) == 0) {
+            if (is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) == 0) {
 
                 f_arrs[nbx](i, j, k, q) = 0.0;
                 g_arrs[nbx](i, j, k, q) = 0.0;
@@ -1374,6 +1916,7 @@ void LBM::RemakeLevel(
         ba, dm, constants::N_MACRO_STATES, m_macrodata_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
     m_is_fluid[lev].define(ba, dm, constants::N_IS_FLUID, m_f[lev].nGrow());
+    m_is_fluid_fraction[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     m_eq[lev].define(
         ba, dm, constants::N_MICRO_STATES, m_eq_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
@@ -1418,6 +1961,7 @@ void LBM::ClearLevel(int lev)
     m_eq_g[lev].clear();
     m_derived[lev].clear();
     m_is_fluid[lev].clear();
+    m_is_fluid_fraction[lev].clear();
     m_plt_mf[lev].clear();
     m_mask[lev].clear();
 }
@@ -1527,7 +2071,7 @@ bool LBM::check_field_existence(const std::string& name)
     {
         const auto vnames = {
             m_macrodata_varnames, m_microdata_varnames, m_microdata_g_varnames,
-            m_deriveddata_varnames, m_idata_varnames};
+            m_deriveddata_varnames, m_idata_varnames, m_fracdata_varnames};
 
         return std::any_of(vnames.begin(), vnames.end(), [=](const auto& vn) {
             return get_field_component(name, vn) != -1;
@@ -1575,7 +2119,7 @@ LBM::get_field(const std::string& name, const int lev, const int ngrow)
     }
     const int srccomp_mdd = get_field_component(name, m_deriveddata_varnames);
     if (srccomp_mdd != -1) {
-        amrex::MultiFab::Copy(*mf, m_derived[lev], srccomp_mid, 0, nc, ngrow);
+        amrex::MultiFab::Copy(*mf, m_derived[lev], srccomp_mdd, 0, nc, ngrow);
     }
     const int srccomp_id = get_field_component(name, m_idata_varnames);
     if (srccomp_id != -1) {
@@ -1589,6 +2133,20 @@ LBM::get_field(const std::string& name, const int lev, const int ngrow)
         amrex::Gpu::synchronize();
     }
 
+    const int srccomp_frac = get_field_component(name, m_fracdata_varnames);
+    if (srccomp_frac != -1) {
+        auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        auto const& mf_arrs = mf->arrays();
+        amrex::ParallelFor(
+            *mf, mf->nGrowVect(), 1,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                mf_arrs[nbx](i, j, k, n) = frac_arrs[nbx](i, j, k, 0);
+            });
+        amrex::Gpu::synchronize();
+    }
+    
+
+
     amrex::Vector<amrex::BCRec> bcs(nc);
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
         for (auto& bc : bcs) {
@@ -1600,6 +2158,7 @@ LBM::get_field(const std::string& name, const int lev, const int ngrow)
 
     return mf;
 }
+
 
 // set covered coarse cells to be the average of overlying fine cells
 void LBM::average_down(amrex::IntVect crse_ng)
@@ -1712,6 +2271,16 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
                     is_fluid_arrs[nbx](i, j, k, n);
             });
         amrex::Gpu::synchronize();
+        cnt += m_is_fluid[lev].nComp();
+        // copy fractional field (1 component)
+        auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        amrex::ParallelFor(
+            m_plt_mf[lev], m_plt_mf[lev].nGrowVect(), 1,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                plt_mf_arrs[nbx](i, j, k, n + cnt) = frac_arrs[nbx](i, j, k, 0);
+            });
+        amrex::Gpu::synchronize();
+        cnt += 1;
 
         r.push_back(&m_plt_mf[lev]);
     }
@@ -1738,6 +2307,7 @@ void LBM::write_checkpoint_file() const
     BL_PROFILE("LBM::write_checkpoint_file()");
     const auto& varnames = m_microdata_varnames;
     const auto& varnames_g = m_microdata_g_varnames;
+    const auto& varnames_frac = m_fracdata_varnames;
 
     // chk00010            write a checkpoint file with this root directory
     // chk00010/Header     this contains information you need to save (e.g.,
@@ -1824,6 +2394,14 @@ void LBM::write_checkpoint_file() const
             m_g[lev], amrex::MultiFabFileFullPrefix(
                           lev, checkpointname, "Level_", varnames_g[0]));
     }
+
+    // write fractional is_fluid field
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        amrex::VisMF::Write(
+            m_is_fluid_fraction[lev], amrex::MultiFabFileFullPrefix(
+                                          lev, checkpointname, "Level_",
+                                          varnames_frac[0]));
+    }
 }
 
 void LBM::read_checkpoint_file()
@@ -1831,6 +2409,7 @@ void LBM::read_checkpoint_file()
     BL_PROFILE("LBM::read_checkpoint_file()");
     const auto& varnames = m_microdata_varnames;
     const auto& varnames_g = m_microdata_g_varnames;
+    const auto& varnames_frac = m_fracdata_varnames;
 
     amrex::Print() << "Restarting from checkpoint file " << m_restart_chkfile
                    << std::endl;
@@ -1922,6 +2501,8 @@ void LBM::read_checkpoint_file()
             ba, dm, constants::N_DERIVED, m_derived_nghost, amrex::MFInfo(),
             *(m_factory[lev]));
         m_mask[lev].define(ba, dm, 1, 0);
+        // define fractional field storage
+        m_is_fluid_fraction[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     }
 
     // read in the MultiFab data
@@ -1935,6 +2516,14 @@ void LBM::read_checkpoint_file()
         amrex::VisMF::Read(
             m_g[lev], amrex::MultiFabFileFullPrefix(
                           lev, m_restart_chkfile, "Level_", varnames_g[0]));
+    }
+
+    // read fractional is_fluid field
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        amrex::VisMF::Read(
+            m_is_fluid_fraction[lev], amrex::MultiFabFileFullPrefix(
+                                          lev, m_restart_chkfile, "Level_",
+                                          varnames_frac[0]));
     }
 
     // Populate the other data

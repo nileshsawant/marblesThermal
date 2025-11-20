@@ -1,5 +1,6 @@
 #include "EB.H"
 #include "Geometry.H"
+#include "Constants.H"
 #include <cstring> // for std::memcpy
 #include <sstream> // for CSV parsing
 
@@ -85,7 +86,7 @@ void initialize_from_stl(
         amrex::ParallelFor(
             is_fluid, is_fluid.nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                is_fluid_arrs[nbx](i, j, k, 0) =
+                is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                     static_cast<int>(marker_arrs[nbx](i, j, k, 0));
             });
         amrex::Gpu::synchronize();
@@ -287,7 +288,8 @@ void generate_voxel_cracks(
                 // Your binary file: 0 = fluid (tubes), 1 = solid
                 // AMReX m_is_fluid: 0 = solid, 1 = fluid
                 // So we need to invert the values
-                is_fluid_arr(i, j, k, 0) = (crack_ptr[file_index] == 0) ? 1 : 0;
+                is_fluid_arr(i, j, k, lbm::constants::IS_FLUID_IDX) =
+                    (crack_ptr[file_index] == 0) ? 1 : 0;
             });
     }
     amrex::Gpu::synchronize();
