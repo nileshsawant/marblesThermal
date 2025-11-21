@@ -1691,12 +1691,14 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         return;
     }
 
-    // Step 5: Refill newly fluid cells by copying from nearest old fluid neighbor
+    // Step 5: Refill newly fluid cells by finding donor in the normal direction
+    // Normal is computed from averaged evs of persistent fluid neighbors
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
     
     auto const& newly_fluid_arrs = newly_fluid.const_arrays();
     auto const& old_fluid_arrs = old_is_fluid.const_arrays();
+    auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
     auto const& f_arrs = m_f[lev].arrays();
     auto const& g_arrs = m_g[lev].arrays();
 
@@ -1706,17 +1708,17 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Only process newly fluid cells
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
             
-            // Get bounds of the arrays to ensure safe access
+            // Get bounds for safety
             const auto& farr = f_arrs[nbx];
             const auto lo = amrex::lbound(farr);
             const auto hi = amrex::ubound(farr);
             
-            // Search for a donor among neighbors
-            int donor_i = -1;
-            int donor_j = -1;
-            int donor_k = -1;
+            // Step 1 & 2: Sum evs vectors for neighbors that were fluid AND still are fluid
+            amrex::Real normal_x = 0.0;
+            amrex::Real normal_y = 0.0;
+            amrex::Real normal_z = 0.0;
+            int num_persistent = 0;
             
-            // Loop through all stencil directions (skip 0, which is self)
             for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                 int ni = i + evs[nq][0];
                 int nj = j + evs[nq][1];
@@ -1727,16 +1729,86 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     nj < lo.y || nj > hi.y || 
                     nk < lo.z || nk > hi.z) continue;
                 
-                // Check if neighbor was fluid in the old mask
-                if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1) {
-                    donor_i = ni;
-                    donor_j = nj;
-                    donor_k = nk;
-                    break;  // Found a donor, stop searching
+                // Check if neighbor was fluid BEFORE and is still fluid NOW
+                if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 && 
+                    curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                    normal_x += evs[nq][0];
+                    normal_y += evs[nq][1];
+                    normal_z += evs[nq][2];
+                    num_persistent++;
                 }
             }
             
-            // Copy all populations from donor (or set to zero if no donor found)
+            // If no persistent neighbors, zero out
+            if (num_persistent == 0) {
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    f_arrs[nbx](i, j, k, q) = 0.0;
+                    g_arrs[nbx](i, j, k, q) = 0.0;
+                }
+                return;
+            }
+            
+            // Step 3: Normalize the normal vector
+            amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
+            if (norm < 1e-12) {
+                // Normal is zero - fall back to first persistent neighbor
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs[nq][0];
+                    int nj = j + evs[nq][1];
+                    int nk = k + evs[nq][2];
+                    
+                    if (ni < lo.x || ni > hi.x || 
+                        nj < lo.y || nj > hi.y || 
+                        nk < lo.z || nk > hi.z) continue;
+                    
+                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 && 
+                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                            f_arrs[nbx](i, j, k, q) = f_arrs[nbx](ni, nj, nk, q);
+                            g_arrs[nbx](i, j, k, q) = g_arrs[nbx](ni, nj, nk, q);
+                        }
+                        return;
+                    }
+                }
+            }
+            
+            normal_x /= norm;
+            normal_y /= norm;
+            normal_z /= norm;
+            
+            // Step 4: Find neighbor with maximum dot product with normal
+            amrex::Real max_dot = -1e10;
+            int donor_i = -1;
+            int donor_j = -1;
+            int donor_k = -1;
+            
+            for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                int ni = i + evs[nq][0];
+                int nj = j + evs[nq][1];
+                int nk = k + evs[nq][2];
+                
+                // Check bounds
+                if (ni < lo.x || ni > hi.x || 
+                    nj < lo.y || nj > hi.y || 
+                    nk < lo.z || nk > hi.z) continue;
+                
+                // Check if neighbor was fluid BEFORE and is still fluid NOW
+                if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 && 
+                    curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                    
+                    // Compute dot product
+                    amrex::Real dot = evs[nq][0]*normal_x + evs[nq][1]*normal_y + evs[nq][2]*normal_z;
+                    
+                    if (dot > max_dot) {
+                        max_dot = dot;
+                        donor_i = ni;
+                        donor_j = nj;
+                        donor_k = nk;
+                    }
+                }
+            }
+            
+            // Step 5: Copy from donor with maximum dot product
             if (donor_i >= 0) {
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     f_arrs[nbx](i, j, k, q) = f_arrs[nbx](donor_i, donor_j, donor_k, q);
