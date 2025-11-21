@@ -1555,12 +1555,18 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
-    // Step 2: Save old fluid mask BEFORE updating
+    // Step 2: Save old fluid mask AND boundary layers BEFORE updating
     amrex::iMultiFab old_is_fluid(
         m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
+    amrex::iMultiFab old_fluid_side_boundary(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
+    
     amrex::iMultiFab::Copy(old_is_fluid, m_is_fluid[lev], 
                           lbm::constants::IS_FLUID_IDX, 0, 1, 0);
+    amrex::iMultiFab::Copy(old_fluid_side_boundary, m_is_fluid[lev], 
+                          lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX, 0, 1, 0);
     old_is_fluid.FillBoundary(Geom(lev).periodicity());
+    old_fluid_side_boundary.FillBoundary(Geom(lev).periodicity());
 
     // Step 3: Update fluid mask based on new fractional values
     update_is_fluid_from_fraction_and_mark(lev, threshold);
@@ -1586,27 +1592,94 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     }
     amrex::Gpu::synchronize();
 
-    // Step 4b: SPILL - Zero out cells that became solid
-    // BUT ONLY if they are actually inside/near the EB object (non-zero fractional value)
+    // Step 4b: SPILL - Distribute mass/energy from newly solid cells to OLD outer boundary layer
+    // Spill to OLD IS_FLUID_SIDE_BOUNDARY (before body moved) - this is the layer that should receive mass
     {
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
         auto const& g_arrs = m_g[lev].arrays();
         
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+        
         amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Only zero out if: (1) became solid AND (2) has EB coverage
-                if (newly_solid_arrs[nbx](i, j, k, 0) == 1) {
-                    amrex::Real frac = frac_arrs[nbx](i, j, k, 0);
-                    // Only spill if this cell is actually covered by EB (frac < 1.0)
-                    // Pure domain cells (frac == 1.0) should never be spilled
-                    if (frac < 1.0) {
+                // Only process cells that became solid AND are covered by EB
+                if (newly_solid_arrs[nbx](i, j, k, 0) != 1) return;
+                
+                amrex::Real frac = frac_arrs[nbx](i, j, k, 0);
+                if (frac >= 1.0) return; // Not an EB cell
+                
+                // Get bounds for safety
+                const auto& farr = f_arrs[nbx];
+                const auto lo = amrex::lbound(farr);
+                const auto hi = amrex::ubound(farr);
+                
+                // Count OLD IS_FLUID_SIDE_BOUNDARY neighbors (outer layer before body moved)
+                int num_boundary_neighbors = 0;
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs[nq][0];
+                    int nj = j + evs[nq][1];
+                    int nk = k + evs[nq][2];
+                    
+                    // Check bounds
+                    if (ni < lo.x || ni > hi.x || 
+                        nj < lo.y || nj > hi.y || 
+                        nk < lo.z || nk > hi.z) continue;
+                    
+                    // Count if neighbor was on the OLD outer boundary layer
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        num_boundary_neighbors++;
+                    }
+                }
+                
+                // If no boundary neighbors, just zero out (mass is lost to EB)
+                if (num_boundary_neighbors == 0) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_arrs[nbx](i, j, k, q) = 0.0;
+                        g_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                    return;
+                }
+                
+                // Distribute mass equally to all old outer boundary neighbors
+                const amrex::Real weight = 1.0 / static_cast<amrex::Real>(num_boundary_neighbors);
+                
+                // Store populations to be distributed
+                amrex::Real f_dist[constants::N_MICRO_STATES];
+                amrex::Real g_dist[constants::N_MICRO_STATES];
+                
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    f_dist[q] = f_arrs[nbx](i, j, k, q) * weight;
+                    g_dist[q] = g_arrs[nbx](i, j, k, q) * weight;
+                }
+                
+                // Distribute to old outer boundary neighbors using atomic add for thread safety
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs[nq][0];
+                    int nj = j + evs[nq][1];
+                    int nk = k + evs[nq][2];
+                    
+                    // Check bounds
+                    if (ni < lo.x || ni > hi.x || 
+                        nj < lo.y || nj > hi.y || 
+                        nk < lo.z || nk > hi.z) continue;
+                    
+                    // Distribute if neighbor was on OLD outer boundary layer
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                            f_arrs[nbx](i, j, k, q) = 0.0;
-                            g_arrs[nbx](i, j, k, q) = 0.0;
+                            amrex::Gpu::Atomic::AddNoRet(&f_arrs[nbx](ni, nj, nk, q), f_dist[q]);
+                            amrex::Gpu::Atomic::AddNoRet(&g_arrs[nbx](ni, nj, nk, q), g_dist[q]);
                         }
                     }
+                }
+                
+                // Zero out the newly solid cell after distribution
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    f_arrs[nbx](i, j, k, q) = 0.0;
+                    g_arrs[nbx](i, j, k, q) = 0.0;
                 }
             });
     }
