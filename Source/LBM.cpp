@@ -1593,7 +1593,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     amrex::Gpu::synchronize();
 
     // Step 4b: SPILL - Distribute mass/energy from newly solid cells to OLD outer boundary layer
-    // Spill to OLD IS_FLUID_SIDE_BOUNDARY (before body moved) - this is the layer that should receive mass
+    // Use stencil weights (proportional to velocity) for distribution
     {
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
@@ -1603,6 +1603,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
+        const auto& weights = stencil.weights;
         
         amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
@@ -1617,8 +1618,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto lo = amrex::lbound(farr);
                 const auto hi = amrex::ubound(farr);
                 
-                // Count OLD IS_FLUID_SIDE_BOUNDARY neighbors (outer layer before body moved)
-                int num_boundary_neighbors = 0;
+                // First pass: compute sum of weights for OLD IS_FLUID_SIDE_BOUNDARY neighbors
+                amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
                     int nj = j + evs[nq][1];
@@ -1629,14 +1630,14 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nj < lo.y || nj > hi.y || 
                         nk < lo.z || nk > hi.z) continue;
                     
-                    // Count if neighbor was on the OLD outer boundary layer
+                    // Add weight if neighbor was on the OLD outer boundary layer
                     if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
-                        num_boundary_neighbors++;
+                        weight_sum += weights[nq];
                     }
                 }
                 
                 // If no boundary neighbors, just zero out (mass is lost to EB)
-                if (num_boundary_neighbors == 0) {
+                if (weight_sum < 1e-12) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_arrs[nbx](i, j, k, q) = 0.0;
                         g_arrs[nbx](i, j, k, q) = 0.0;
@@ -1644,19 +1645,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     return;
                 }
                 
-                // Distribute mass equally to all old outer boundary neighbors
-                const amrex::Real weight = 1.0 / static_cast<amrex::Real>(num_boundary_neighbors);
-                
-                // Store populations to be distributed
-                amrex::Real f_dist[constants::N_MICRO_STATES];
-                amrex::Real g_dist[constants::N_MICRO_STATES];
-                
-                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                    f_dist[q] = f_arrs[nbx](i, j, k, q) * weight;
-                    g_dist[q] = g_arrs[nbx](i, j, k, q) * weight;
-                }
-                
-                // Distribute to old outer boundary neighbors using atomic add for thread safety
+                // Second pass: distribute to neighbors using normalized weights
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
                     int nj = j + evs[nq][1];
@@ -1669,9 +1658,16 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     
                     // Distribute if neighbor was on OLD outer boundary layer
                     if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        // Normalized weight for this direction
+                        amrex::Real w = weights[nq] / weight_sum;
+                        
+                        // Distribute all populations with this weight
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                            amrex::Gpu::Atomic::AddNoRet(&f_arrs[nbx](ni, nj, nk, q), f_dist[q]);
-                            amrex::Gpu::Atomic::AddNoRet(&g_arrs[nbx](ni, nj, nk, q), g_dist[q]);
+                            amrex::Real f_contrib = f_arrs[nbx](i, j, k, q) * w;
+                            amrex::Real g_contrib = g_arrs[nbx](i, j, k, q) * w;
+                            
+                            amrex::Gpu::Atomic::AddNoRet(&f_arrs[nbx](ni, nj, nk, q), f_contrib);
+                            amrex::Gpu::Atomic::AddNoRet(&g_arrs[nbx](ni, nj, nk, q), g_contrib);
                         }
                     }
                 }
