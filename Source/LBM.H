@@ -127,6 +127,12 @@ public:
     // If threshold is negative, the class default is used.
     void refill_and_spill(const int lev, amrex::Real threshold = -1.0);
 
+    // Reconstruct fractional mask from body signed distance function.
+    // For rigid body motion (translation + rotation), this updates
+    // m_is_fluid_fraction by evaluating the body geometry in its current
+    // position/orientation without numerical diffusion.
+    void reconstruct_body_sdf(const int lev, amrex::Real time);
+
     // Initialize masks
     void initialize_mask(const int lev);
 
@@ -332,6 +338,14 @@ private:
 
     // threshold for converting fractional mask into integer is_fluid
     amrex::Real m_is_fluid_fraction_threshold = 0.5;
+
+    // Moving body parameters
+    bool m_body_is_moving = false;
+    amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};
+    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity = {0.0, 0.0, 0.0};
+    amrex::GpuArray<amrex::Real, 3> m_body_center = {0.0, 0.0, 0.0};
+    amrex::Real m_body_rotation_angle = 0.0;  // accumulated rotation
+    std::string m_body_geom_type = "";
 
     // Body is isothermal.
     bool m_bodyIsIsothermal = false;
