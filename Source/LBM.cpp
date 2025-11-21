@@ -1526,10 +1526,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& old_mask_arrs = old_mask.const_arrays();
         auto const& new_mask_arrs = m_is_fluid[lev].const_arrays();
         auto const& newly_solid_arrs = newly_solid.arrays();
-        // capture arrays by reference to avoid copying iMultiFab objects into the lambda
+        // capture arrays by value for GPU compatibility
         amrex::ParallelFor(newly_solid, newly_solid.nGrowVect(), 1,
-                           [&old_mask_arrs, &new_mask_arrs, &newly_solid_arrs]
-                               AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                           [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                                    const int oldv = old_mask_arrs[nbx](i, j, k, 0);
                                    const int newv = new_mask_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
                                    newly_solid_arrs[nbx](i, j, k, n) = (oldv == 1 && newv == 0) ? 1 : 0;
@@ -1537,8 +1536,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
         auto const& newly_fluid_arrs = newly_fluid.arrays();
         amrex::ParallelFor(newly_fluid, newly_fluid.nGrowVect(), 1,
-                           [&old_mask_arrs, &new_mask_arrs, &newly_fluid_arrs]
-                               AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+                           [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                                    const int oldv = old_mask_arrs[nbx](i, j, k, 0);
                                    const int newv = new_mask_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
                                    newly_fluid_arrs[nbx](i, j, k, n) = (oldv == 0 && newv == 1) ? 1 : 0;
@@ -1672,8 +1670,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& g_arrs = m_g[lev].arrays();
         amrex::ParallelFor(
             m_f[lev], m_f[lev].nGrowVect(), 1,
-            [&newly_solid_arrs, &f_arrs, &g_arrs]
-                AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                     if (newly_solid_arrs[nbx](i, j, k, 0) == 1) {
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                             f_arrs[nbx](i, j, k, q) = 0.0;
