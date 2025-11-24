@@ -113,7 +113,6 @@ LBM::LBM()
     m_mask.resize(nlevs_max);
 
     m_factory.resize(nlevs_max);
-
     // BCs
     m_bcs.resize(constants::N_MICRO_STATES);
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
@@ -1702,6 +1701,47 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     auto const& f_arrs = m_f[lev].arrays();
     auto const& g_arrs = m_g[lev].arrays();
 
+    // Snapshot pre-refill totals (mass_old, energy_old) based on current m_f/m_g
+    amrex::MultiFab mass_old(
+        m_f[lev].boxArray(), m_f[lev].DistributionMap(), 1, 0);
+    amrex::MultiFab energy_old(
+        m_g[lev].boxArray(), m_g[lev].DistributionMap(), 1, 0);
+
+    {
+        auto const& mass_old_arrs = mass_old.arrays();
+        auto const& energy_old_arrs = energy_old.arrays();
+        auto const& f_arrs_loc = m_f[lev].const_arrays();
+        auto const& g_arrs_loc = m_g[lev].const_arrays();
+        amrex::ParallelFor(mass_old, [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+            const auto f_arr = f_arrs_loc[nbx];
+            const auto g_arr = g_arrs_loc[nbx];
+            amrex::Real msum = 0.0;
+            amrex::Real gsum = 0.0;
+            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                msum += f_arr(i, j, k, q);
+                gsum += g_arr(i, j, k, q);
+            }
+            mass_old_arrs[nbx](i, j, k, 0) = msum;
+            energy_old_arrs[nbx](i, j, k, 0) = gsum;
+        });
+    }
+    amrex::Gpu::synchronize();
+
+    // Prepare donor_index to record where each newly-fluid cell copied from
+    amrex::iMultiFab donor_index(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 0);
+    donor_index.setVal(-1);
+
+    // Domain linearization parameters for computing linear index inside kernels
+    const auto dom = Geom(lev).Domain();
+    const auto dom_lo = dom.smallEnd();
+    const int nx = dom.length(0);
+    const int ny = dom.length(1);
+    const int nz = dom.length(2);
+    const amrex::Long ncells_level = static_cast<amrex::Long>(nx) * ny * nz;
+
+    auto donor_idx_arrs = donor_index.arrays();
+
     amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             
@@ -1814,6 +1854,11 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     f_arrs[nbx](i, j, k, q) = f_arrs[nbx](donor_i, donor_j, donor_k, q);
                     g_arrs[nbx](i, j, k, q) = g_arrs[nbx](donor_i, donor_j, donor_k, q);
                 }
+
+                // record donor linear index relative to domain origin so we can
+                // aggregate corrections per donor later
+                const int li = ((donor_k - dom_lo[2]) * ny + (donor_j - dom_lo[1])) * nx + (donor_i - dom_lo[0]);
+                donor_idx_arrs[nbx](i, j, k, 0) = li;
             } else {
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     f_arrs[nbx](i, j, k, q) = 0.0;
