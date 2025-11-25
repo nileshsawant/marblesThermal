@@ -1998,6 +1998,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
         auto const& g_arrs = m_g[lev].arrays();
+        auto const& md_arrs = m_macrodata[lev].arrays();
+        auto const& d_arrs = m_derived[lev].arrays();
         
         amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
@@ -2006,6 +2008,20 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_arrs[nbx](i, j, k, q) = 0.0;
                         g_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                    
+                    // Reset macrodata (check bounds as it might have fewer ghosts)
+                    if (md_arrs[nbx].contains(i, j, k)) {
+                        for (int n = 0; n < constants::N_MACRO_STATES; ++n) {
+                            md_arrs[nbx](i, j, k, n) = 0.0;
+                        }
+                    }
+
+                    // Reset derived data
+                    if (d_arrs[nbx].contains(i, j, k)) {
+                        for (int n = 0; n < constants::N_DERIVED; ++n) {
+                            d_arrs[nbx](i, j, k, n) = 0.0;
+                        }
                     }
                 }
             });
