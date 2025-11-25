@@ -1992,7 +1992,27 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         });
     amrex::Gpu::synchronize();
 
-    // Step 8: Fill boundary cells for updated data
+    // Step 8: Reset populations in ALL solid cells (after spill and refill are complete)
+    // This ensures no residual populations remain inside the solid body
+    {
+        auto const& fluid_arrs = m_is_fluid[lev].const_arrays();
+        auto const& f_arrs = m_f[lev].arrays();
+        auto const& g_arrs = m_g[lev].arrays();
+        
+        amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // Zero out populations in all solid cells
+                if (fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) == 0) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_arrs[nbx](i, j, k, q) = 0.0;
+                        g_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                }
+            });
+    }
+    amrex::Gpu::synchronize();
+    
+    // Step 9: Fill boundary cells for updated data
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
