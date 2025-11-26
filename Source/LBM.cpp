@@ -1593,22 +1593,12 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
     // Step 4b: SPILL - Distribute mass/energy from newly solid cells to OLD outer boundary layer
     // Use stencil weights (proportional to velocity) for distribution
-    
-    // Create temporary MultiFabs to accumulate spilled mass/energy
-    // This is necessary to correctly handle spills into ghost cells
-    amrex::MultiFab spill_f(m_f[lev].boxArray(), m_f[lev].DistributionMap(), constants::N_MICRO_STATES, m_f[lev].nGrow());
-    amrex::MultiFab spill_g(m_g[lev].boxArray(), m_g[lev].DistributionMap(), constants::N_MICRO_STATES, m_g[lev].nGrow());
-    spill_f.setVal(0.0);
-    spill_g.setVal(0.0);
-
     {
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
         auto const& g_arrs = m_g[lev].arrays();
-        auto const& spill_f_arrs = spill_f.arrays();
-        auto const& spill_g_arrs = spill_g.arrays();
         
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
@@ -1675,8 +1665,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                             amrex::Real f_contrib = f_arrs[nbx](i, j, k, q) * w;
                             amrex::Real g_contrib = g_arrs[nbx](i, j, k, q) * w;
                             
-                            amrex::Gpu::Atomic::AddNoRet(&spill_f_arrs[nbx](ni, nj, nk, q), f_contrib);
-                            amrex::Gpu::Atomic::AddNoRet(&spill_g_arrs[nbx](ni, nj, nk, q), g_contrib);
+                            amrex::Gpu::Atomic::AddNoRet(&f_arrs[nbx](ni, nj, nk, q), f_contrib);
+                            amrex::Gpu::Atomic::AddNoRet(&g_arrs[nbx](ni, nj, nk, q), g_contrib);
                         }
                     }
                 }
@@ -1690,22 +1680,12 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     }
     amrex::Gpu::synchronize();
 
-    // Sum spilled mass from ghosts to valid cells
-    spill_f.SumBoundary(Geom(lev).periodicity());
-    spill_g.SumBoundary(Geom(lev).periodicity());
-
-    // Add spilled mass to main MFs
-    amrex::MultiFab::Add(m_f[lev], spill_f, 0, 0, constants::N_MICRO_STATES, 0);
-    amrex::MultiFab::Add(m_g[lev], spill_g, 0, 0, constants::N_MICRO_STATES, 0);
-
-    // Update ghosts so Refill sees the post-spill values
-    m_f[lev].FillBoundary(Geom(lev).periodicity());
-    m_g[lev].FillBoundary(Geom(lev).periodicity());
-
     // Check if there are any newly fluid cells - if not, skip refill
     amrex::Long num_newly_fluid = newly_fluid.sum(0);
     if (num_newly_fluid == 0) {
         // No cells transitioned to fluid - nothing to refill
+        m_f[lev].FillBoundary(Geom(lev).periodicity());
+        m_g[lev].FillBoundary(Geom(lev).periodicity());
         m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
         return;
     }
@@ -1723,10 +1703,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
     // Count how many recipients each donor cell will have
     // This is needed for mass conservation: each donor divides its mass among recipients
-    // Use MultiFab (Real) to allow SumBoundary
-    amrex::MultiFab donor_recipient_count(
+    amrex::iMultiFab donor_recipient_count(
         m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
-    donor_recipient_count.setVal(0.0);
+    donor_recipient_count.setVal(0);
     
     // First pass: identify donors for each newly-fluid cell and increment recipient count
     auto donor_count_arrs = donor_recipient_count.arrays();
@@ -1840,15 +1819,13 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Step 5: Increment donor recipient count
             if (donor_i >= 0) {
                 // Atomically increment the count for this donor
-                amrex::Gpu::Atomic::Add(&donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0), 1.0);
+                amrex::Gpu::Atomic::Add(&donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0), 1);
             }
         });
     amrex::Gpu::synchronize();
     
-    // Sum counts from ghosts to valid cells
-    donor_recipient_count.SumBoundary(Geom(lev).periodicity());
-    
     // Synchronize donor counts across ghost cells
+    donor_recipient_count.SumBoundary(Geom(lev).periodicity());
     donor_recipient_count.FillBoundary(Geom(lev).periodicity());
     
     // Step 6: Second pass - Transfer ONLY q=0 component from donors to newly-fluid cells
@@ -1914,7 +1891,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 && 
                         curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
                         
-                        int n_recipients = static_cast<int>(donor_count_arrs[nbx](ni, nj, nk, 0));
+                        int n_recipients = donor_count_arrs[nbx](ni, nj, nk, 0);
                         // Scale = 1/(N+1) to conserve mass among donor + N recipients
                         amrex::Real scale = 1.0 / amrex::Real(n_recipients + 1);
                         
@@ -1973,7 +1950,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             
             // Transfer ONLY q=0 component with proper conservation
             if (donor_i >= 0) {
-                int n_recipients = static_cast<int>(donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0));
+                int n_recipients = donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0);
                 // Scale = 1/(N+1) to conserve mass among donor + N recipients
                 amrex::Real scale = 1.0 / amrex::Real(n_recipients + 1);
                 
@@ -2001,7 +1978,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             
             // Check if this cell is a donor (has recipients)
-            int n_recipients = static_cast<int>(donor_count_arrs[nbx](i, j, k, 0));
+            int n_recipients = donor_count_arrs[nbx](i, j, k, 0);
             if (n_recipients == 0) return;
             
             // Check if this cell is still fluid (donors must be fluid)
@@ -2025,7 +2002,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& md_arrs = m_macrodata[lev].arrays();
         auto const& d_arrs = m_derived[lev].arrays();
         
-        amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
+        amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 // Zero out populations in all solid cells
                 if (fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) == 0) {
