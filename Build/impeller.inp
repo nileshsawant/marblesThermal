@@ -53,7 +53,7 @@ ic_constant.adiabatic_exponent = 1.4
 # MOVING BODY PARAMETERS - NEW
 body.is_moving = true
 body.velocity = 0.0 0.0 0.0
-body.angular_velocity = 0.0 0.0 0.005
+body.angular_velocity = 0.0 0.0 0.0005
 body.center = 330.0 330.0 0.0
 
 eb2.geom_type = "parser"
