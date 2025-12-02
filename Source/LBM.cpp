@@ -1602,12 +1602,21 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
     // Step 4b: SPILL - Distribute mass/energy from newly solid cells to OLD outer boundary layer
     // Use stencil weights (proportional to velocity) for distribution
+    
+    // Create temporary MultiFabs to accumulate spilled mass (to handle ghost cell updates correctly)
+    amrex::MultiFab spill_f(m_f[lev].boxArray(), m_f[lev].DistributionMap(), constants::N_MICRO_STATES, m_f[lev].nGrow());
+    amrex::MultiFab spill_g(m_g[lev].boxArray(), m_g[lev].DistributionMap(), constants::N_MICRO_STATES, m_g[lev].nGrow());
+    spill_f.setVal(0.0);
+    spill_g.setVal(0.0);
+
     {
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
         auto const& g_arrs = m_g[lev].arrays();
+        auto const& spill_f_arrs = spill_f.arrays();
+        auto const& spill_g_arrs = spill_g.arrays();
         
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
@@ -1674,8 +1683,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                             amrex::Real f_contrib = f_arrs[nbx](i, j, k, q) * w;
                             amrex::Real g_contrib = g_arrs[nbx](i, j, k, q) * w;
                             
-                            amrex::Gpu::Atomic::AddNoRet(&f_arrs[nbx](ni, nj, nk, q), f_contrib);
-                            amrex::Gpu::Atomic::AddNoRet(&g_arrs[nbx](ni, nj, nk, q), g_contrib);
+                            // Add to spill buffer instead of direct modification
+                            amrex::Gpu::Atomic::AddNoRet(&spill_f_arrs[nbx](ni, nj, nk, q), f_contrib);
+                            amrex::Gpu::Atomic::AddNoRet(&spill_g_arrs[nbx](ni, nj, nk, q), g_contrib);
                         }
                     }
                 }
@@ -1688,6 +1698,18 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             });
     }
     amrex::Gpu::synchronize();
+
+    // Sum spilled mass from ghost cells to valid cells
+    spill_f.SumBoundary(Geom(lev).periodicity());
+    spill_g.SumBoundary(Geom(lev).periodicity());
+
+    // Add spilled mass to the main fluid arrays
+    amrex::MultiFab::Add(m_f[lev], spill_f, 0, 0, constants::N_MICRO_STATES, 0);
+    amrex::MultiFab::Add(m_g[lev], spill_g, 0, 0, constants::N_MICRO_STATES, 0);
+
+    // Sync boundaries so everyone sees the updated mass
+    m_f[lev].FillBoundary(Geom(lev).periodicity());
+    m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // Check if there are any newly fluid cells - if not, skip refill
     amrex::Long num_newly_fluid = newly_fluid.sum(0);
@@ -1837,7 +1859,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     
     // Step 6: Second pass - Transfer ONLY q=0 component from donors to newly-fluid cells
     // Recipients get mass/energy at rest (no momentum/flux), avoiding discontinuities
-    // Conservation: donor gives 1/(N+1) of its q=0 to each of N recipients
+    // Conservation: donor gives ALL of its q=0 to be shared among N recipients
     amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             
@@ -1899,8 +1921,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
                         
                         int n_recipients = donor_count_arrs[nbx](ni, nj, nk, 0);
-                        // Scale = 1/(N+1) to conserve mass among donor + N recipients
-                        amrex::Real scale = 1.0 / amrex::Real(n_recipients + 1);
+                        // Scale = 1/N to conserve mass (donor gives away everything)
+                        amrex::Real scale = 1.0 / amrex::Real(n_recipients);
                         
                         // Recipient gets ONLY q=0 component (mass/energy at rest)
                         f_arrs[nbx](i, j, k, 0) = f_arrs[nbx](ni, nj, nk, 0) * scale;
@@ -1954,8 +1976,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Transfer ONLY q=0 component with proper conservation
             if (donor_i >= 0) {
                 int n_recipients = donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0);
-                // Scale = 1/(N+1) to conserve mass among donor + N recipients
-                amrex::Real scale = 1.0 / amrex::Real(n_recipients + 1);
+                // Scale = 1/N to conserve mass (donor gives away everything)
+                amrex::Real scale = 1.0 / amrex::Real(n_recipients);
                 
                 // Recipient gets ONLY q=0 component (mass/energy at rest)
                 f_arrs[nbx](i, j, k, 0) = f_arrs[nbx](donor_i, donor_j, donor_k, 0) * scale;
@@ -1976,7 +1998,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     amrex::Gpu::synchronize();
     
     // Step 7: Third pass - Reduce donor's q=0 component to conserve mass
-    // Donors reduce their q=0 by factor N/(N+1) where N is number of recipients
+    // Donors give away ALL of their q=0 component
     amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             
@@ -1987,12 +2009,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Check if this cell is still fluid (donors must be fluid)
             if (curr_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) != 1) return;
             
-            // Scale factor: donor keeps 1/(N+1) of its original q=0
-            amrex::Real scale = 1.0 / amrex::Real(n_recipients + 1);
-            
-            // Reduce q=0 components only (momentum structure preserved in q=1..26)
-            f_arrs[nbx](i, j, k, 0) *= scale;
-            g_arrs[nbx](i, j, k, 0) *= scale;
+            // Donor gives away ALL of q=0
+            f_arrs[nbx](i, j, k, 0) = 0.0;
+            g_arrs[nbx](i, j, k, 0) = 0.0;
         });
     amrex::Gpu::synchronize();
 
