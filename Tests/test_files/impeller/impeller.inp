@@ -1,4 +1,4 @@
-max_step = 1000
+max_step = 10000
 
 # geometry parameters
 geometry.prob_lo = 0.0 0.0 -2.0
