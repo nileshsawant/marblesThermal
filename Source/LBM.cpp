@@ -1,4 +1,5 @@
 #include <memory>
+#include <AMReX_Parser.H>
 
 #include "LBM.H"
 
@@ -335,6 +336,7 @@ void LBM::read_parameters()
     {
         amrex::ParmParse pp("eb2");
         pp.query("geom_type", m_body_geom_type);
+        amrex::Print() << "Read body geom_type: '" << m_body_geom_type << "'" << std::endl;
     }
 
     {
@@ -1338,6 +1340,13 @@ void LBM::initialize_is_fluid(const int lev)
 
     initialize_from_stl(Geom(lev), m_is_fluid[lev]);
 
+    // If body is moving, reconstruct the SDF at t=0 to ensure correct initial position
+    if (m_body_is_moving) {
+        reconstruct_body_sdf(lev, 0.0);
+        // Update is_fluid from the reconstructed fraction
+        update_is_fluid_from_fraction_and_mark(lev, m_is_fluid_fraction_threshold);
+    }
+
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
 
     // Compute the boundary cells
@@ -1692,25 +1701,23 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
     // Step 5: Refill newly fluid cells by finding donor in the normal direction
     // Normal is computed from averaged evs of persistent fluid neighbors
-    const stencil::Stencil stencil;
-    const auto& evs = stencil.evs;
     
-    auto const& newly_fluid_arrs = newly_fluid.const_arrays();
-    auto const& old_fluid_arrs = old_is_fluid.const_arrays();
-    auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
-    auto const& f_arrs = m_f[lev].arrays();
-    auto const& g_arrs = m_g[lev].arrays();
-
-    // Count how many recipients each donor cell will have
-    // This is needed for mass conservation: each donor divides its mass among recipients
     amrex::iMultiFab donor_recipient_count(
         m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
     donor_recipient_count.setVal(0);
-    
-    // First pass: identify donors for each newly-fluid cell and increment recipient count
-    auto donor_count_arrs = donor_recipient_count.arrays();
-    
-    amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
+
+    {
+        auto const& newly_fluid_arrs = newly_fluid.const_arrays();
+        auto const& f_arrs = m_f[lev].arrays();
+        auto const& g_arrs = m_g[lev].arrays();
+        auto const& old_fluid_arrs = old_is_fluid.const_arrays();
+        auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
+        auto const& donor_count_arrs = donor_recipient_count.arrays();
+        
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+
+        amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             
             // Only process newly fluid cells
@@ -1915,10 +1922,6 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 return;
             }
             
-            normal_x /= norm;
-            normal_y /= norm;
-            normal_z /= norm;
-            
             // Find neighbor with maximum dot product with normal
             amrex::Real max_dot = -1e10;
             int donor_i = -1;
@@ -1993,6 +1996,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         });
     amrex::Gpu::synchronize();
 
+    } // End of refill block
+
     // Step 8: Reset populations in ALL solid cells (after spill and refill are complete)
     // This ensures no residual populations remain inside the solid body
     {
@@ -2046,7 +2051,12 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     const auto prob_lo = geom.ProbLoArray();
     
     // Update body position and orientation
-    const amrex::Real dt = time - m_ts_old[lev];
+    amrex::Real dt = time - m_ts_old[lev];
+    // If m_ts_old is uninitialized (LOW_NUM), assume dt = 0 (initialization step)
+    if (m_ts_old[lev] < -1.0e20) {
+        dt = 0.0;
+    }
+
     const amrex::Real vx = m_body_velocity[0];
     const amrex::Real vy = m_body_velocity[1];
     const amrex::Real vz = m_body_velocity[2];
@@ -2059,6 +2069,9 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     
     if (omega_mag > 1e-12) {
         m_body_rotation_angle += omega_mag * dt;
+        amrex::Print() << "Updating rotation: dt=" << dt 
+                       << " omega=" << omega_mag 
+                       << " angle=" << m_body_rotation_angle << std::endl;
     }
     
     // Current body center (for translation)
@@ -2083,7 +2096,24 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     int cyl_direction = 2;
     bool cyl_has_fluid_inside = false;
     
-    if (m_body_geom_type == "rotated_cylinder" || m_body_geom_type == "cylinder") {
+    // Parser support
+    amrex::Parser parser;
+    amrex::ParserExecutor<3> parser_exe;
+    bool use_parser = (m_body_geom_type == "parser");
+
+    if (m_isteps[lev] == 0) {
+        amrex::Print() << "reconstruct_body_sdf: geom_type='" << m_body_geom_type 
+                       << "', use_parser=" << use_parser << std::endl;
+    }
+
+    if (use_parser) {
+        amrex::ParmParse pp("eb2");
+        std::string parser_function;
+        pp.get("parser_function", parser_function);
+        parser.define(parser_function);
+        parser.registerVariables({"x", "y", "z"});
+        parser_exe = parser.compile<3>();
+    } else if (m_body_geom_type == "rotated_cylinder" || m_body_geom_type == "cylinder") {
         amrex::ParmParse pp("eb2");
         pp.query("cylinder_radius", cyl_radius);
         pp.query("cylinder_direction", cyl_direction);
@@ -2121,8 +2151,12 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
             // Compute signed distance based on geometry type
             amrex::Real sdf = 0.0;
             
-            // Cylinder SDF: distance = radius - r_perp where r_perp is distance to axis
-            if (cyl_direction == 0) {
+            if (use_parser) {
+                // Evaluate parser function
+                // The parser function defines the shape in the local body frame (centered at 0,0,0).
+                // We pass the local coordinates (xr, yr, zr) directly.
+                sdf = -parser_exe(xr, yr, zr);
+            } else if (cyl_direction == 0) {
                 // X-aligned cylinder
                 sdf = cyl_radius - std::sqrt(yr * yr + zr * zr);
             } else if (cyl_direction == 1) {
