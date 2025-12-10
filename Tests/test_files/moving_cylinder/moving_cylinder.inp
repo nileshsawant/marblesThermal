@@ -1,4 +1,4 @@
-max_step = 40000
+max_step = 50000
 
 # geometry parameters
 geometry.prob_lo = 0.0 0.0 -2.0
@@ -52,9 +52,9 @@ ic_constant.adiabatic_exponent = 1.4
 
 # MOVING BODY PARAMETERS - NEW
 body.is_moving = true
-body.velocity = 0.01 0.0 0.0
+body.velocity = -0.01 0.0 0.0
 body.angular_velocity = 0.0 0.0 0.0
-body.center = 60.0 60.0 0.0
+body.center = 600.0 61.5 0.0
 
 eb2.geom_type = "cylinder"
 eb2.cylinder_radius = 15.0
