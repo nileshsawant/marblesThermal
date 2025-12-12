@@ -105,6 +105,9 @@ public:
     // Initialize is_fluid
     void initialize_is_fluid(const int lev);
 
+    // Initialize moving body shape from file
+    void initialize_moving_body_shape(int lev);
+
     // Update integer is_fluid mask from the fractional field and recompute
     // boundary markers (steps 1 and 2 of refill_and_spill preparation).
     // If threshold is omitted, class default m_is_fluid_fraction_threshold is used.
@@ -257,6 +260,14 @@ private:
     
     //non-integer mask to identify fluid cells. Will be moved with advection equation for moving solid body
     amrex::Vector<amrex::MultiFab> m_is_fluid_fraction;
+
+    // Moving body reference data
+    amrex::Gpu::DeviceVector<uint16_t> m_body_voxel_data;
+    amrex::IntVect m_body_voxel_dims{0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_origin{0.0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_dx{0.0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_initial_center{0.0};
+    bool m_using_voxel_body = false;
  
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;

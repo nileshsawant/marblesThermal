@@ -1317,6 +1317,82 @@ void LBM::initialize_f(const int lev)
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 }
 
+void LBM::initialize_moving_body_shape(int lev)
+{
+    if (m_using_voxel_body) return;
+
+    amrex::ParmParse pp("eb2");
+    std::string geom_type;
+    pp.query("geom_type", geom_type);
+    
+    std::string stl_file;
+    pp.query("stl_file", stl_file);
+    
+    amrex::ParmParse ppvc("voxel_cracks");
+    std::string vc_file;
+    ppvc.query("crack_file", vc_file);
+    int use_voxel_cracks = 0;
+    pp.query("use_voxel_cracks", use_voxel_cracks);
+
+    bool is_file_based = (geom_type == "stl") || 
+                         (!stl_file.empty()) || 
+                         (use_voxel_cracks != 0) || 
+                         (!vc_file.empty());
+
+    if (is_file_based) {
+        amrex::Print() << "Initializing moving body reference from current fluid field..." << std::endl;
+        
+        const amrex::Geometry& geom = Geom(lev);
+        const amrex::Box& domain = geom.Domain();
+        const int nx = domain.length(0);
+        const int ny = domain.length(1);
+        const int nz = domain.length(2);
+        size_t num_cells = static_cast<size_t>(nx) * ny * nz;
+        
+        // Gather m_is_fluid[lev]
+        amrex::BoxArray ba_full(domain);
+        amrex::Vector<int> pmap(1, amrex::ParallelDescriptor::MyProc());
+        amrex::DistributionMapping dm_local(pmap);
+        amrex::iMultiFab local_imf(ba_full, dm_local, 1, 0);
+        
+        local_imf.ParallelCopy(m_is_fluid[lev]);
+        
+        m_body_voxel_data.resize(num_cells);
+        auto* voxel_ptr = m_body_voxel_data.data();
+        
+        for (amrex::MFIter mfi(local_imf); mfi.isValid(); ++mfi) {
+            const amrex::Box& box = mfi.validbox();
+            auto const& fab_arr = local_imf.array(mfi);
+            
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                size_t idx = k * (nx * ny) + j * nx + i;
+                voxel_ptr[idx] = static_cast<uint16_t>(fab_arr(i, j, k, lbm::constants::IS_FLUID_IDX));
+            });
+        }
+        amrex::Gpu::synchronize();
+        
+        m_using_voxel_body = true;
+        
+        // Set metadata
+        m_body_voxel_dims = domain.length();
+        m_body_voxel_origin = geom.ProbLoArray();
+        m_body_voxel_dx = geom.CellSizeArray();
+        
+        amrex::Vector<amrex::Real> center(3, 0.0);
+        pp.queryarr("stl_center", center);
+        
+        if (center[0] == 0.0 && center[1] == 0.0 && center[2] == 0.0) {
+             m_body_initial_center[0] = m_body_center[0];
+             m_body_initial_center[1] = m_body_center[1];
+             m_body_initial_center[2] = m_body_center[2];
+        } else {
+             m_body_initial_center[0] = center[0];
+             m_body_initial_center[1] = center[1];
+             m_body_initial_center[2] = center[2];
+        }
+    }
+}
+
 void LBM::initialize_is_fluid(const int lev)
 {
     BL_PROFILE("LBM::initialize_is_fluid()");
@@ -1342,6 +1418,7 @@ void LBM::initialize_is_fluid(const int lev)
 
     // If body is moving, reconstruct the SDF at t=0 to ensure correct initial position
     if (m_body_is_moving) {
+        initialize_moving_body_shape(lev);
         reconstruct_body_sdf(lev, 0.0);
         // Update is_fluid from the reconstructed fraction
         update_is_fluid_from_fraction_and_mark(lev, m_is_fluid_fraction_threshold);
@@ -2141,6 +2218,14 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     
     // Reconstruct fractional field from SDF
     auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
+
+    // Capture voxel data
+    const bool using_voxel_body = m_using_voxel_body;
+    const uint16_t* voxel_ptr = using_voxel_body ? m_body_voxel_data.data() : nullptr;
+    const amrex::IntVect voxel_dims = m_body_voxel_dims;
+    const auto voxel_origin = m_body_voxel_origin;
+    const auto voxel_dx = m_body_voxel_dx;
+    const auto initial_center = m_body_initial_center;
     
     amrex::ParallelFor(
         m_is_fluid_fraction[lev], m_is_fluid_fraction[lev].nGrowVect(),
@@ -2170,7 +2255,34 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
             // Compute signed distance based on geometry type
             amrex::Real sdf = 0.0;
             
-            if (use_parser) {
+            if (using_voxel_body) {
+                 amrex::Real x_init = xr + initial_center[0];
+                 amrex::Real y_init = yr + initial_center[1];
+                 amrex::Real z_init = zr + initial_center[2];
+                 
+                 int i_idx = static_cast<int>(std::floor((x_init - voxel_origin[0]) / voxel_dx[0]));
+                 int j_idx = static_cast<int>(std::floor((y_init - voxel_origin[1]) / voxel_dx[1]));
+                 int k_idx = static_cast<int>(std::floor((z_init - voxel_origin[2]) / voxel_dx[2]));
+                 
+                 bool is_fluid = true; 
+                 
+                 if (i_idx >= 0 && i_idx < voxel_dims[0] &&
+                     j_idx >= 0 && j_idx < voxel_dims[1] &&
+                     k_idx >= 0 && k_idx < voxel_dims[2]) {
+                     
+                     size_t idx = k_idx * (voxel_dims[0] * voxel_dims[1]) + 
+                                  j_idx * voxel_dims[0] + i_idx;
+                     
+                     // 1=fluid, 0=solid
+                     is_fluid = (voxel_ptr[idx] != 0);
+                 }
+                 
+                 // Large value for sharp interface
+                 // For solid bodies (default), is_fluid=true means we are outside the body.
+                 // The downstream logic expects sdf < 0 for fluid (outside) and sdf > 0 for solid (inside).
+                 sdf = is_fluid ? -1.0 : 1.0;
+
+            } else if (use_parser) {
                 // Evaluate parser function
                 // The parser function defines the shape in the local body frame (centered at 0,0,0).
                 // We pass the local coordinates (xr, yr, zr) directly.
