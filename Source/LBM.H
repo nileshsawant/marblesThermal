@@ -108,6 +108,9 @@ public:
     // Initialize moving body shape from file
     void initialize_moving_body_shape(int lev);
 
+    // Initialize stationary body from file (STL/CSV)
+    void init_stationary_body(int lev);
+
     // Update integer is_fluid mask from the fractional field and recompute
     // boundary markers (steps 1 and 2 of refill_and_spill preparation).
     // If threshold is omitted, class default m_is_fluid_fraction_threshold is used.
@@ -268,6 +271,10 @@ private:
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_dx{0.0};
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_initial_center{0.0};
     bool m_using_voxel_body = false;
+
+    // Stationary body reference data
+    amrex::Vector<amrex::iMultiFab> m_stationary_mask;
+    bool m_has_stationary_body = false;
  
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;

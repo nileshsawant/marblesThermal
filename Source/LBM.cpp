@@ -112,6 +112,7 @@ LBM::LBM()
     m_is_fluid_fraction.resize(nlevs_max);
     m_plt_mf.resize(nlevs_max);
     m_mask.resize(nlevs_max);
+    m_stationary_mask.resize(nlevs_max);
 
     m_factory.resize(nlevs_max);
     // BCs
@@ -1271,11 +1272,13 @@ void LBM::MakeNewLevelFromScratch(
         ba, dm, constants::N_DERIVED, m_derived_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
     m_mask[lev].define(ba, dm, 1, 0);
+    m_stationary_mask[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
 
     m_ts_new[lev] = time;
     m_ts_old[lev] = constants::LOW_NUM;
 
     // Initialize the data
+    init_stationary_body(lev);
     initialize_is_fluid(lev);
     // initialize fractional field from integer mask (component 0)
     {
@@ -1390,6 +1393,100 @@ void LBM::initialize_moving_body_shape(int lev)
              m_body_initial_center[1] = center[1];
              m_body_initial_center[2] = center[2];
         }
+    }
+}
+
+void LBM::init_stationary_body(int lev)
+{
+    BL_PROFILE("LBM::init_stationary_body()");
+    
+    amrex::ParmParse pp("eb2");
+    std::string stl_file;
+    std::string crack_file;
+    
+    m_stationary_mask[lev].setVal(1); // Default to Fluid (1)
+    
+    bool has_stl = pp.query("stationary_stl_file", stl_file);
+    bool has_crack = pp.query("stationary_crack_file", crack_file);
+    
+    if (has_stl) {
+        m_has_stationary_body = true;
+        amrex::Print() << "Loading stationary STL: " << stl_file << std::endl;
+        
+        amrex::Real scale = 1.0;
+        int reverse_normal = 0;
+        amrex::Array<amrex::Real, 3> center = {0.0, 0.0, 0.0};
+        pp.query("stationary_stl_scale", scale);
+        pp.query("stationary_stl_reverse_normal", reverse_normal);
+        pp.query("stationary_stl_center", center);
+
+        amrex::STLtools stlobj;
+        stlobj.read_stl_file(stl_file, scale, center, reverse_normal);
+
+        amrex::MultiFab marker(
+            m_stationary_mask[lev].boxArray(), m_stationary_mask[lev].DistributionMap(), 1,
+            m_stationary_mask[lev].nGrow());
+
+        const amrex::Real outside_value = 1.0; // Fluid
+        const amrex::Real inside_value = 0.0;  // Solid
+        marker.setVal(1.0);
+        stlobj.fill(
+            marker, marker.nGrowVect(), Geom(lev), outside_value, inside_value);
+        amrex::Gpu::synchronize();
+
+        auto const& marker_arrs = marker.const_arrays();
+        auto const& mask_arrs = m_stationary_mask[lev].arrays();
+        amrex::ParallelFor(
+            m_stationary_mask[lev], m_stationary_mask[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // Combine with existing mask (intersection of fluids -> min)
+                // 0=Solid, 1=Fluid. min(1, 0) = 0 (Solid).
+                int val = static_cast<int>(marker_arrs[nbx](i, j, k, 0));
+                mask_arrs[nbx](i, j, k) = amrex::min(mask_arrs[nbx](i, j, k), val);
+            });
+        amrex::Gpu::synchronize();
+    }
+    
+    if (has_crack) {
+        m_has_stationary_body = true;
+        const auto& geom = Geom(lev);
+        const amrex::Box& domain = geom.Domain();
+        const int nx = domain.length(0);
+        const int ny = domain.length(1);
+        const int nz = domain.length(2);
+        
+        amrex::Print() << "Loading stationary crack file: " << crack_file << std::endl;
+        
+        std::vector<uint16_t> crack_data = read_crack_file(crack_file, nx, ny, nz);
+        
+        amrex::Gpu::DeviceVector<uint16_t> d_crack_data(crack_data.size());
+        amrex::Gpu::copyAsync(
+            amrex::Gpu::hostToDevice, crack_data.begin(), crack_data.end(),
+            d_crack_data.begin());
+        amrex::Gpu::synchronize();
+
+        auto const* crack_ptr = d_crack_data.data();
+        
+        for (amrex::MFIter mfi(m_stationary_mask[lev]); mfi.isValid(); ++mfi) {
+            const amrex::Box& box = mfi.validbox();
+            auto const& mask_arr = m_stationary_mask[lev].array(mfi);
+
+            amrex::ParallelFor(
+                box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                    int file_index = k * (nx * ny) + j * nx + i;
+                    // File: 0=Fluid, 1=Solid
+                    // Mask: 1=Fluid, 0=Solid
+                    int val = (crack_ptr[file_index] == 0) ? 1 : 0;
+                    mask_arr(i, j, k) = amrex::min(mask_arr(i, j, k), val);
+                });
+        }
+        amrex::Gpu::synchronize();
+    }
+    
+    // Also check for stationary parser function (handled in reconstruct_body_sdf, but we set flag here)
+    std::string stationary_parser_function;
+    if (pp.query("stationary_parser_function", stationary_parser_function)) {
+        m_has_stationary_body = true;
     }
 }
 
@@ -2197,9 +2294,25 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     amrex::ParserExecutor<3> parser_exe;
     bool use_parser = (m_body_geom_type == "parser");
 
+    // Stationary Parser support
+    amrex::Parser parser_stat;
+    amrex::ParserExecutor<3> parser_stat_exe;
+    bool use_stationary_parser = false;
+    {
+        amrex::ParmParse pp("eb2");
+        std::string stationary_parser_function;
+        if (pp.query("stationary_parser_function", stationary_parser_function)) {
+            use_stationary_parser = true;
+            parser_stat.define(stationary_parser_function);
+            parser_stat.registerVariables({"x", "y", "z"});
+            parser_stat_exe = parser_stat.compile<3>();
+        }
+    }
+
     if (m_isteps[lev] == 0) {
         amrex::Print() << "reconstruct_body_sdf: geom_type='" << m_body_geom_type 
-                       << "', use_parser=" << use_parser << std::endl;
+                       << "', use_parser=" << use_parser 
+                       << ", use_stationary_parser=" << use_stationary_parser << std::endl;
     }
 
     if (use_parser) {
@@ -2226,6 +2339,10 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     const auto voxel_origin = m_body_voxel_origin;
     const auto voxel_dx = m_body_voxel_dx;
     const auto initial_center = m_body_initial_center;
+
+    // Capture stationary mask
+    const bool has_stationary_body = m_has_stationary_body;
+    auto const& stat_mask_arrs = m_stationary_mask[lev].const_arrays();
     
     amrex::ParallelFor(
         m_is_fluid_fraction[lev], m_is_fluid_fraction[lev].nGrowVect(),
@@ -2296,6 +2413,25 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
             } else {
                 // Z-aligned cylinder (default)
                 sdf = cyl_radius - std::sqrt(xr * xr + yr * yr);
+            }
+
+            if (use_stationary_parser) {
+                // Evaluate stationary parser function in lab frame
+                // Note: parser function is expected to be SDF (negative inside, positive outside)
+                // But we use -parser() convention here to match the above logic where sdf > 0 is solid.
+                // So if user provides standard SDF (neg inside), -SDF is pos inside (solid).
+                amrex::Real sdf_stat = -parser_stat_exe(x, y, z);
+                sdf = amrex::max(sdf, sdf_stat);
+            }
+
+            if (has_stationary_body) {
+                // Check mask (STL/CSV)
+                // Mask: 1=Fluid, 0=Solid
+                // If 0, force sdf to be positive (Solid)
+                int is_fluid_stat = stat_mask_arrs[nbx](i, j, k);
+                if (is_fluid_stat == 0) {
+                    sdf = amrex::max(sdf, 1.0);
+                }
             }
             
             // Convert SDF to fractional field
