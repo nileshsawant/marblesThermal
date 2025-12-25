@@ -253,6 +253,7 @@ private:
     // array of multifabs to store the solution at each level of refinement
     amrex::Vector<amrex::MultiFab> m_macrodata;
     amrex::Vector<amrex::MultiFab> m_f;
+    amrex::Vector<amrex::Vector<amrex::MultiFab>> m_component_lattices;
     amrex::Vector<amrex::MultiFab> m_g;
     amrex::Vector<amrex::MultiFab> m_eq;
     amrex::Vector<amrex::MultiFab> m_eq_g;
@@ -291,6 +292,7 @@ private:
     amrex::Vector<amrex::BCRec> m_bcs;
 
     std::unique_ptr<FillPatchOpsBase> m_fillpatch_op;
+    amrex::Vector<std::unique_ptr<FillPatchOpsBase>> m_component_fillpatch_ops;
     std::unique_ptr<FillPatchOpsBase> m_fillpatch_g_op;
 
     amrex::Vector<std::unique_ptr<amrex::FabFactory<amrex::FArrayBox>>>
@@ -323,6 +325,8 @@ private:
     amrex::Real m_dt_outer = 1.0;
     amrex::Real m_nu = 1.0;
     amrex::Real m_alpha = 1.0;
+    int m_n_components = 0;
+    amrex::Vector<amrex::Real> m_component_diffusivities;
 
     // save streaming data to plot file
     bool m_save_streaming = true;
@@ -345,6 +349,7 @@ private:
     amrex::Real m_cs_2 = 1.0;
 
     std::unique_ptr<ic::InitializerBase> m_ic_op;
+    amrex::Vector<std::unique_ptr<ic::InitializerBase>> m_component_ic_ops;
     std::string m_ic_type;
 
     // LBM Scheme selector. "energyD3Q27" activates product equilibrium,

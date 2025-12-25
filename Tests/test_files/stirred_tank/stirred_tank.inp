@@ -43,6 +43,7 @@ lbm.ic_type = "constant"
 ic_constant.mach_components = 0.0 0.0 0.0
 ic_constant.density = 1.0
 ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
 
 # MOVING BODY PARAMETERS
 body.is_moving = true

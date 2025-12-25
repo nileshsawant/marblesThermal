@@ -59,7 +59,7 @@ struct Constant
 
     using DeviceType = DeviceOp;
 
-    explicit Constant();
+    explicit Constant(const std::string& prefix = "ic_constant");
 
     static std::string identifier() { return "ic_constant"; }
 
@@ -432,6 +432,7 @@ public:
     virtual ~InitializerBase() = default;
 
     virtual void initialize(const int lev, amrex::GeometryData const& geom) = 0;
+    virtual void initialize_lattice(const int lev, amrex::GeometryData const& geom, amrex::MultiFab& mf) = 0;
 };
 
 template <typename ICOp>
@@ -444,7 +445,7 @@ public:
         const amrex::Real& mesh_speed,
         const ICOp ic_op,
         amrex::Vector<amrex::MultiFab>& f)
-        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f)
+        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(nullptr)
     {}
 
     Initializer(
@@ -452,18 +453,19 @@ public:
         const ICOp& ic_op,
         amrex::Vector<amrex::MultiFab>& f,
         amrex::Vector<amrex::MultiFab>& g)
-        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(g)
+        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(&g)
     {}
 
     ~Initializer() override = default;
 
     void initialize(const int lev, amrex::GeometryData const& geom) override
     {
+        AMREX_ASSERT(m_g != nullptr);
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
         const auto& weight = stencil.weights;
         auto const& f_arrs = m_f[lev].arrays();
-        auto const& g_arrs = m_g[lev].arrays();
+        auto const& g_arrs = (*m_g)[lev].arrays();
         const amrex::Real l_mesh_speed = m_mesh_speed;
         ICDeviceOp ic(m_op.device_instance());
 
@@ -524,10 +526,50 @@ public:
         amrex::Gpu::synchronize();
     }
 
+    void initialize_lattice(const int lev, amrex::GeometryData const& geom, amrex::MultiFab& mf) override
+    {
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+        const auto& weight = stencil.weights;
+        auto const& f_arrs = mf.arrays();
+        const amrex::Real l_mesh_speed = m_mesh_speed;
+        ICDeviceOp ic(m_op.device_instance());
+
+        if (ic.model_type == 1) {
+            amrex::ParallelFor(
+                mf, mf.nGrowVect(), constants::N_MICRO_STATES,
+                [=] AMREX_GPU_DEVICE(
+                    int nbx, int i, int j, int k, int q) noexcept {
+                    const amrex::Real wt = weight[q];
+                    const auto& ev = evs[q];
+
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    amrex::Real rho = 1.0;
+                    amrex::RealVect vel(AMREX_D_DECL(0.0, 0.0, 0.0));
+                    amrex::Real temperature = 1.0 / 3.0;
+                    amrex::Real specific_gas_constant =
+                        ic.R_u / constants::AIR_MOLAR_MASS;
+                    amrex::Real gamma = 1.667;
+
+                    ic.thermal_initialize(
+                        iv, geom, rho, vel, temperature, specific_gas_constant,
+                        gamma);
+
+                    f_arrs[nbx](i, j, k, q) = set_equilibrium_value(
+                        rho, vel, specific_gas_constant * temperature,
+                        l_mesh_speed, wt, ev);
+                });
+        } else {
+            amrex::Abort("Invalid model_type");
+        }
+
+        amrex::Gpu::synchronize();
+    }
+
     const amrex::Real m_mesh_speed;
     const ICOp m_op;
     amrex::Vector<amrex::MultiFab>& m_f;
-    amrex::Vector<amrex::MultiFab>& m_g;
+    amrex::Vector<amrex::MultiFab>* m_g;
 };
 
 } // namespace lbm::ic

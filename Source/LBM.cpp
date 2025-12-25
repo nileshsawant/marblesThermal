@@ -90,6 +90,10 @@ LBM::LBM()
         m_lbm_varnames.push_back(vname);
     }
 
+    for (int i = 0; i < m_n_components; ++i) {
+        m_lbm_varnames.push_back("Y_" + std::to_string(i));
+    }
+
     read_tagging_parameters();
 
     m_isteps.resize(nlevs_max, 0);
@@ -104,6 +108,10 @@ LBM::LBM()
 
     m_macrodata.resize(nlevs_max);
     m_f.resize(nlevs_max);
+    m_component_lattices.resize(m_n_components);
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i].resize(nlevs_max);
+    }
     m_g.resize(nlevs_max);
     m_eq.resize(nlevs_max);
     m_eq_g.resize(nlevs_max);
@@ -227,6 +235,7 @@ void LBM::read_parameters()
 
     {
         amrex::ParmParse pp("lbm");
+        pp.query("n_components", m_n_components);
         pp.queryarr("bc_lo", m_bc_lo, 0, AMREX_SPACEDIM);
         pp.queryarr("bc_hi", m_bc_hi, 0, AMREX_SPACEDIM);
         for (int i = 0; i < AMREX_SPACEDIM; i++) {
@@ -287,6 +296,13 @@ void LBM::read_parameters()
         pp.query("nu", m_nu);
         m_alpha = m_nu;
         pp.query("alpha", m_alpha);
+
+        m_component_diffusivities.resize(m_n_components);
+        for (int i = 0; i < m_n_components; ++i) {
+            std::string diff_key = "diffusivity_component_" + std::to_string(i);
+            m_component_diffusivities[i] = m_nu;
+            pp.query(diff_key.c_str(), m_component_diffusivities[i]);
+        }
 
         pp.query("save_streaming", m_save_streaming);
         pp.query("save_derived", m_save_derived);
@@ -598,6 +614,9 @@ void LBM::advance(
     }
 
     stream(lev, m_f);
+    for (int i = 0; i < m_n_components; ++i) {
+        stream(lev, m_component_lattices[i]);
+    }
 
     stream(lev, m_g);
 
@@ -874,8 +893,51 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
             }
         });
+
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+        amrex::Real diff = m_component_diffusivities[c];
+
+        amrex::ParallelFor(
+            m_component_lattices[c][lev], m_eq[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
+                    const auto f_comp_arr = f_comp_arrs[nbx];
+                    const auto eq_arr = eq_arrs[nbx];
+                    const auto md_arr = md_arrs[nbx];
+
+                    amrex::Real rho_comp = 0.0;
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        rho_comp += f_comp_arr(iv, q);
+                    }
+
+                    amrex::Real rho_total = md_arr(iv, constants::RHO_IDX);
+                    amrex::Real Y_k =
+                        (rho_total > 1e-12) ? (rho_comp / rho_total) : 0.0;
+
+                    amrex::Real temperature =
+                        md_arr(iv, constants::TEMPERATURE_IDX);
+                    amrex::Real omega_comp =
+                        1.0 /
+                        (diff / (specific_gas_constant * temperature * dt) +
+                         0.5);
+
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        amrex::Real eq_comp = Y_k * eq_arr(iv, q);
+                        f_comp_arr(iv, q) +=
+                            omega_comp * (eq_comp - f_comp_arr(iv, q));
+                    }
+                }
+            });
+    }
+
     amrex::Gpu::synchronize();
     m_f[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 }
 
@@ -1184,6 +1246,12 @@ void LBM::MakeNewLevelFromCoarse(
     m_f[lev].define(
         ba, dm, m_f[lev - 1].nComp(), m_f[lev - 1].nGrow(), amrex::MFInfo(),
         *(m_factory[lev]));
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].define(
+            ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
+            *(m_factory[lev]));
+        m_component_lattices[i][lev].setVal(0.0);
+    }
     m_g[lev].define(
         ba, dm, m_g[lev - 1].nComp(), m_g[lev - 1].nGrow(), amrex::MFInfo(),
         *(m_factory[lev]));
@@ -1220,6 +1288,9 @@ void LBM::MakeNewLevelFromCoarse(
     }
     initialize_mask(lev);
     m_fillpatch_op->fillpatch_from_coarse(lev, time, m_f[lev]);
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_fillpatch_ops[i]->fillpatch_from_coarse(lev, time, m_component_lattices[i][lev]);
+    }
 
     m_fillpatch_g_op->fillpatch_from_coarse(lev, time, m_g[lev]);
 
@@ -1257,6 +1328,12 @@ void LBM::MakeNewLevelFromScratch(
     m_f[lev].define(
         ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].define(
+            ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
+            *(m_factory[lev]));
+        m_component_lattices[i][lev].setVal(0.0);
+    }
     m_g[lev].define(
         ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
@@ -1313,11 +1390,31 @@ void LBM::initialize_f(const int lev)
     BL_PROFILE("LBM::initialize_f()");
 
     m_ic_op->initialize(lev, geom[lev].data());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_ic_ops[i]->initialize_lattice(lev, geom[lev].data(), m_component_lattices[i][lev]);
+    }
 
     fill_f_inside_eb(lev);
 
+    // Zero out inside EB for additional components
+    auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& f_arrs = m_component_lattices[c][lev].arrays();
+        amrex::ParallelFor(
+            m_component_lattices[c][lev], m_component_lattices[c][lev].nGrowVect(), constants::N_MICRO_STATES,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
+                if (is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) == 0) {
+                    f_arrs[nbx](i, j, k, q) = 0.0;
+                }
+            });
+    }
+    amrex::Gpu::synchronize();
+
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
 }
 
 void LBM::initialize_moving_body_shape(int lev)
@@ -1735,6 +1832,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     m_is_fluid_fraction[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
     m_f[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // Step 2: Save old fluid mask AND boundary layers BEFORE updating
@@ -1883,6 +1983,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
     // Sync boundaries so everyone sees the updated mass
     m_f[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // Check if there are any newly fluid cells - if not, skip refill
@@ -1890,6 +1993,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     if (num_newly_fluid == 0) {
         // No cells transitioned to fluid - nothing to refill
         m_f[lev].FillBoundary(Geom(lev).periodicity());
+        for (int i = 0; i < m_n_components; ++i) {
+            m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+        }
         m_g[lev].FillBoundary(Geom(lev).periodicity());
         m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
         return;
@@ -2513,14 +2619,28 @@ void LBM::RemakeLevel(
     amrex::MultiFab new_f(
         ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
+    amrex::Vector<amrex::MultiFab> new_component_lattices(m_n_components);
+    for (int i = 0; i < m_n_components; ++i) {
+        new_component_lattices[i].define(
+            ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
+            *(m_factory[lev]));
+        new_component_lattices[i].setVal(0.0);
+    }
     amrex::MultiFab new_g(
         ba, dm, constants::N_MICRO_STATES, m_f_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
 
     m_fillpatch_op->fillpatch(lev, time, new_f);
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_fillpatch_ops[i]->fillpatch(lev, time, new_component_lattices[i]);
+    }
+
     m_fillpatch_g_op->fillpatch(lev, time, new_g);
 
     std::swap(new_f, m_f[lev]);
+    for (int i = 0; i < m_n_components; ++i) {
+         std::swap(new_component_lattices[i], m_component_lattices[i][lev]);
+    }
     std::swap(new_g, m_g[lev]);
 
     m_macrodata[lev].define(
@@ -2543,6 +2663,9 @@ void LBM::RemakeLevel(
     initialize_mask(lev);
     fill_f_inside_eb(lev);
     m_f[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
     m_macrodata[lev].setVal(0.0);
     m_eq[lev].setVal(0.0);
@@ -2583,6 +2706,7 @@ void LBM::set_bcs()
 
     BL_PROFILE("LBM::set_bcs()");
     const bool is_an_energy_lattice(true);
+    m_component_fillpatch_ops.resize(m_n_components);
 
     if (m_velocity_bc_type == "noop") {
 
@@ -2591,6 +2715,12 @@ void LBM::set_bcs()
         m_fillpatch_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
             VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect()), m_f);
+
+        for (int i = 0; i < m_n_components; ++i) {
+            m_component_fillpatch_ops[i] = std::make_unique<FillPatchOps<VelBCOp>>(
+                geom, refRatio(), m_bcs,
+                VelBCOp(m_mesh_speed, m_bc_type, m_component_lattices[i][0].nGrowVect()), m_component_lattices[i]);
+        }
 
         m_fillpatch_g_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
@@ -2605,13 +2735,20 @@ void LBM::set_bcs()
 
         m_fillpatch_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
-            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect()), m_f);
+            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect(), "velocity_bc_constant"), m_f);
+
+        for (int i = 0; i < m_n_components; ++i) {
+            std::string prefix = "velocity_bc_constant_component_" + std::to_string(i);
+            m_component_fillpatch_ops[i] = std::make_unique<FillPatchOps<VelBCOp>>(
+                geom, refRatio(), m_bcs,
+                VelBCOp(m_mesh_speed, m_bc_type, m_component_lattices[i][0].nGrowVect(), prefix), m_component_lattices[i]);
+        }
 
         m_fillpatch_g_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
             VelBCOp(
                 m_mesh_speed, m_bc_type, m_g[0].nGrowVect(),
-                is_an_energy_lattice),
+                "velocity_bc_constant", is_an_energy_lattice),
             m_g);
 
     } else if (m_velocity_bc_type == "channel") {
@@ -2620,13 +2757,20 @@ void LBM::set_bcs()
 
         m_fillpatch_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
-            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect()), m_f);
+            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect(), "velocity_bc_channel"), m_f);
+
+        for (int i = 0; i < m_n_components; ++i) {
+            std::string prefix = "velocity_bc_channel_component_" + std::to_string(i);
+            m_component_fillpatch_ops[i] = std::make_unique<FillPatchOps<VelBCOp>>(
+                geom, refRatio(), m_bcs,
+                VelBCOp(m_mesh_speed, m_bc_type, m_component_lattices[i][0].nGrowVect(), prefix), m_component_lattices[i]);
+        }
 
         m_fillpatch_g_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
             VelBCOp(
                 m_mesh_speed, m_bc_type, m_g[0].nGrowVect(),
-                is_an_energy_lattice),
+                "velocity_bc_channel", is_an_energy_lattice),
             m_g);
 
     } else if (m_velocity_bc_type == "parabolic") {
@@ -2635,13 +2779,20 @@ void LBM::set_bcs()
 
         m_fillpatch_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
-            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect()), m_f);
+            VelBCOp(m_mesh_speed, m_bc_type, m_f[0].nGrowVect(), "velocity_bc_parabolic"), m_f);
+
+        for (int i = 0; i < m_n_components; ++i) {
+            std::string prefix = "velocity_bc_parabolic_component_" + std::to_string(i);
+            m_component_fillpatch_ops[i] = std::make_unique<FillPatchOps<VelBCOp>>(
+                geom, refRatio(), m_bcs,
+                VelBCOp(m_mesh_speed, m_bc_type, m_component_lattices[i][0].nGrowVect(), prefix), m_component_lattices[i]);
+        }
 
         m_fillpatch_g_op = std::make_unique<FillPatchOps<VelBCOp>>(
             geom, refRatio(), m_bcs,
             VelBCOp(
                 m_mesh_speed, m_bc_type, m_g[0].nGrowVect(),
-                is_an_energy_lattice),
+                "velocity_bc_parabolic", is_an_energy_lattice),
             m_g);
 
     } else {
@@ -2671,6 +2822,20 @@ void LBM::set_ics()
     } else {
         amrex::Abort(
             "LBM::set_ics(): User must specify a valid initial condition");
+    }
+
+    m_component_ic_ops.resize(m_n_components);
+    for (int i = 0; i < m_n_components; ++i) {
+        std::string prefix = "ic_constant_component_" + std::to_string(i);
+        if (m_ic_type == "constant") {
+            m_component_ic_ops[i] = std::make_unique<ic::Initializer<ic::Constant>>(
+                m_mesh_speed, ic::Constant(prefix), m_component_lattices[i]);
+        } else {
+            // Fallback or error if other IC types are not supported for components yet
+            // For now, assume constant IC for components if main IC is constant
+             m_component_ic_ops[i] = std::make_unique<ic::Initializer<ic::Constant>>(
+                m_mesh_speed, ic::Constant(prefix), m_component_lattices[i]);
+        }
     }
 }
 
@@ -2892,6 +3057,26 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
             });
         amrex::Gpu::synchronize();
         cnt += 1;
+
+        auto const& md_arrs = m_macrodata[lev].const_arrays();
+        for (int c = 0; c < m_n_components; ++c) {
+            auto const& f_comp_arrs = m_component_lattices[c][lev].const_arrays();
+            amrex::ParallelFor(
+                m_plt_mf[lev], m_plt_mf[lev].nGrowVect(),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    amrex::Real rho_comp = 0.0;
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        rho_comp += f_comp_arrs[nbx](i, j, k, q);
+                    }
+                    amrex::Real rho_total =
+                        md_arrs[nbx](i, j, k, constants::RHO_IDX);
+                    amrex::Real Y_k =
+                        (rho_total > 1e-12) ? (rho_comp / rho_total) : 0.0;
+                    plt_mf_arrs[nbx](i, j, k, cnt) = Y_k;
+                });
+            amrex::Gpu::synchronize();
+            cnt += 1;
+        }
 
         r.push_back(&m_plt_mf[lev]);
     }

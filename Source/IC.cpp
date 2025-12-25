@@ -1,9 +1,9 @@
 #include "IC.H"
 namespace lbm::ic {
 
-Constant::Constant()
+Constant::Constant(const std::string& prefix)
 {
-    amrex::ParmParse pp(identifier());
+    amrex::ParmParse pp(prefix);
     pp.query("density", m_op.density);
 
     amrex::Vector<amrex::Real> velocity{AMREX_D_DECL(0, 0, 0)};
@@ -18,6 +18,11 @@ Constant::Constant()
     for (int n = 0; n < mach_components.size(); n++) {
         m_op.mach_components[n] = mach_components[n];
     }
+
+    amrex::ParmParse ppl("lbm");
+    ppl.query("initial_temperature", m_op.initial_temperature);
+    ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
+    ppl.query("mean_molecular_mass", m_op.m_bar);
 
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
@@ -95,6 +100,10 @@ ThermalDiffusivityTest::ThermalDiffusivityTest()
         m_op.mach_components[n] = mach_components[n];
     }
 
+    amrex::ParmParse ppl("lbm");
+    ppl.query("initial_temperature", m_op.initial_temperature);
+    ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
+
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
     pp.query("mean_molecular_mass", m_op.m_bar);
@@ -128,6 +137,10 @@ SodTest::SodTest()
     for (int n = 0; n < mach_components.size(); n++) {
         m_op.mach_components[n] = mach_components[n];
     }
+
+    amrex::ParmParse ppl("lbm");
+    ppl.query("initial_temperature", m_op.initial_temperature);
+    ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
 
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
