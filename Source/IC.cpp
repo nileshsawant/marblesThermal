@@ -68,6 +68,11 @@ ViscosityTest::ViscosityTest()
         m_op.mach_components[n] = mach_components[n];
     }
 
+    amrex::ParmParse ppl("lbm");
+    ppl.query("initial_temperature", m_op.initial_temperature);
+    ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
+    ppl.query("mean_molecular_mass", m_op.m_bar);
+
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
 
@@ -103,6 +108,7 @@ ThermalDiffusivityTest::ThermalDiffusivityTest()
     amrex::ParmParse ppl("lbm");
     ppl.query("initial_temperature", m_op.initial_temperature);
     ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
+    ppl.query("mean_molecular_mass", m_op.m_bar);
 
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
@@ -141,6 +147,7 @@ SodTest::SodTest()
     amrex::ParmParse ppl("lbm");
     ppl.query("initial_temperature", m_op.initial_temperature);
     ppl.query("adiabatic_exponent", m_op.adiabatic_exponent);
+    ppl.query("mean_molecular_mass", m_op.m_bar);
 
     pp.query("initial_temperature", m_op.initial_temperature);
     pp.query("adiabatic_exponent", m_op.adiabatic_exponent);
