@@ -765,7 +765,7 @@ void LBM::macrodata_to_equilibrium(const int lev)
                 const amrex::Real omega_one_by_omega = omega_one / omega;
                 const amrex::Real omega_corr =
                     (2.0 - omega) / (2.0 * omega * rho);
-
+                
                 const amrex::Real pxx_ext =
                     vel[0] * vel[0] + specific_gas_constant * temperature +
                     dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_X_IDX);
@@ -862,6 +862,11 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
     const bool body_is_isothermal = m_bodyIsIsothermal;
 
+    const amrex::Real l_mesh_speed = m_mesh_speed;
+    const stencil::Stencil stencil;
+    const auto& evs = stencil.evs;
+    const auto& weight = stencil.weights;
+
     amrex::ParallelFor(
         m_f[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(
@@ -924,8 +929,25 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         (diff / (specific_gas_constant * temperature * dt) +
                          0.5);
 
+                    const amrex::RealVect vel = {AMREX_D_DECL(
+                        md_arr(iv, constants::VELX_IDX),
+                        md_arr(iv, constants::VELY_IDX),
+                        md_arr(iv, constants::VELZ_IDX))};
+
+                    const amrex::Real pxx_eq =
+                        vel[0] * vel[0] + specific_gas_constant * temperature;
+                    const amrex::Real pyy_eq =
+                        vel[1] * vel[1] + specific_gas_constant * temperature;
+                    const amrex::Real pzz_eq = AMREX_D_PICK(
+                        0.0, 0.0,
+                        vel[2] * vel[2] + specific_gas_constant * temperature);
+
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        amrex::Real eq_comp = Y_k * eq_arr(iv, q);
+                        const amrex::Real wt = weight[q];
+                        const auto& ev = evs[q];
+                        amrex::Real eq_val = set_extended_equilibrium_value(
+                            rho_total, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, wt, ev);
+                        amrex::Real eq_comp = Y_k * eq_val;
                         f_comp_arr(iv, q) +=
                             omega_comp * (eq_comp - f_comp_arr(iv, q));
                     }
