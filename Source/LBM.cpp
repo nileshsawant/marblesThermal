@@ -978,6 +978,17 @@ void LBM::f_to_macrodata(const int lev)
     const bool body_is_isothermal = m_bodyIsIsothermal;
     const amrex::Real body_temperature = m_bodyTemperature;
 
+    const bool body_is_moving = m_body_is_moving;
+    const auto body_velocity = m_body_velocity;
+    const auto body_angular_velocity = m_body_angular_velocity;
+    const auto body_center = m_body_center;
+    const amrex::Real current_time = m_ts_new[lev];
+    const auto prob_lo = Geom(lev).ProbLoArray();
+    const auto dx = Geom(lev).CellSizeArray();
+
+    const bool has_stationary_body = m_has_stationary_body;
+    auto const& stat_mask_arrs = m_stationary_mask[lev].const_arrays();
+
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
     amrex::ParallelFor(
@@ -1023,6 +1034,58 @@ void LBM::f_to_macrodata(const int lev)
                 AMREX_D_DECL(
                     u *= l_mesh_speed / rho, v *= l_mesh_speed / rho,
                     w *= l_mesh_speed / rho);
+
+                if (body_is_moving) {
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                        bool apply_velocity = true;
+                        if (has_stationary_body) {
+                            apply_velocity = false;
+                            // Check if any neighbor is a moving solid
+                            // Moving solid = Solid in is_fluid AND Fluid in stationary_mask
+                            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                                const auto& ev = evs[q];
+                                amrex::IntVect iv_nb = iv + ev;
+                                if (is_fluid_arrs[nbx](iv_nb, lbm::constants::IS_FLUID_IDX) == 0) {
+                                    // It is solid. Is it stationary?
+                                    // stationary_mask: 1=Fluid, 0=Solid
+                                    if (stat_mask_arrs[nbx](iv_nb) == 1) {
+                                        // It is NOT stationary solid, so it must be moving solid
+                                        apply_velocity = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (apply_velocity) {
+                            // Calculate body center at current time
+                            amrex::Real cx = body_center[0] + body_velocity[0] * current_time;
+                            amrex::Real cy = body_center[1] + body_velocity[1] * current_time;
+                            amrex::Real cz = body_center[2] + body_velocity[2] * current_time;
+
+                            // Calculate cell center coordinates
+                            amrex::Real x = prob_lo[0] + (i + 0.5) * dx[0];
+                            amrex::Real y = prob_lo[1] + (j + 0.5) * dx[1];
+                            amrex::Real z = 0.0;
+#if AMREX_SPACEDIM == 3
+                            z = prob_lo[2] + (k + 0.5) * dx[2];
+#endif
+
+                            // Calculate velocity due to translation and rotation
+                            // v = v_trans + omega x r
+                            // r = (x,y,z) - (cx,cy,cz)
+                            amrex::Real rx = x - cx;
+                            amrex::Real ry = y - cy;
+                            amrex::Real rz = z - cz;
+
+                            u = body_velocity[0] + (body_angular_velocity[1] * rz - body_angular_velocity[2] * ry);
+                            v = body_velocity[1] + (body_angular_velocity[2] * rx - body_angular_velocity[0] * rz);
+#if AMREX_SPACEDIM == 3
+                            w = body_velocity[2] + (body_angular_velocity[0] * ry - body_angular_velocity[1] * rx);
+#endif
+                        }
+                    }
+                }
 
                 md_arr(iv, constants::RHO_IDX) = rho;
                 AMREX_D_DECL(
