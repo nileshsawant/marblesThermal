@@ -91,7 +91,7 @@ LBM::LBM()
     }
 
     for (int i = 0; i < m_n_components; ++i) {
-        m_lbm_varnames.push_back("Y_" + std::to_string(i));
+        m_lbm_varnames.push_back("rho_" + std::to_string(i));
     }
 
     read_tagging_parameters();
@@ -489,6 +489,9 @@ void LBM::evolve()
                        << std::endl;
 
         m_fillpatch_op->fillpatch(0, cur_time, m_f[0]);
+        for (int i = 0; i < m_n_components; ++i) {
+            m_component_fillpatch_ops[i]->fillpatch(0, cur_time, m_component_lattices[i][0]);
+        }
 
         m_fillpatch_g_op->fillpatch(0, cur_time, m_g[0]);
 
@@ -572,11 +575,17 @@ void LBM::time_step(const int lev, const amrex::Real time, const int iteration)
 
     if (lev < finest_level) {
         m_fillpatch_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_f[lev + 1]);
+        for (int i = 0; i < m_n_components; ++i) {
+            m_component_fillpatch_ops[i]->fillpatch(lev + 1, m_ts_new[lev + 1], m_component_lattices[i][lev + 1]);
+        }
 
         m_fillpatch_g_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
 
         for (int i = 1; i <= m_nsubsteps[lev + 1]; ++i) {
             m_fillpatch_op->physbc(lev + 1, m_ts_new[lev + 1], m_f[lev + 1]);
+            for (int c = 0; c < m_n_components; ++c) {
+                m_component_fillpatch_ops[c]->physbc(lev + 1, m_ts_new[lev + 1], m_component_lattices[c][lev + 1]);
+            }
 
             m_fillpatch_g_op->physbc(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
 
@@ -1701,6 +1710,22 @@ void LBM::initialize_is_fluid(const int lev)
         reconstruct_body_sdf(lev, 0.0);
         // Update is_fluid from the reconstructed fraction
         update_is_fluid_from_fraction_and_mark(lev, m_is_fluid_fraction_threshold);
+    }
+
+    if (m_has_stationary_body) {
+        auto const& stationary_mask_arrs = m_stationary_mask[lev].const_arrays();
+        auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // Merge stationary mask: if stationary mask is 0 (solid), is_fluid becomes 0
+                // is_fluid = min(is_fluid, stationary_mask)
+                is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) = amrex::min(
+                    is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX),
+                    stationary_mask_arrs[nbx](i, j, k)
+                );
+            });
+        amrex::Gpu::synchronize();
     }
 
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
