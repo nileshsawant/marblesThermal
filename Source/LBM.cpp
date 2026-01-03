@@ -619,6 +619,15 @@ void LBM::advance(
     // Update moving body position and reconstruct fluid/solid boundaries
     if (m_body_is_moving) {
         reconstruct_body_sdf(lev, m_ts_new[lev]);
+        
+        // Fill ghost cells BEFORE refill_and_spill so that spill algorithm
+        // doesn't read stale/uninitialized values from ghost cells
+        m_f[lev].FillBoundary(Geom(lev).periodicity());
+        m_g[lev].FillBoundary(Geom(lev).periodicity());
+        for (int i = 0; i < m_n_components; ++i) {
+            m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+        }
+        
         refill_and_spill(lev);
     }
 
@@ -634,6 +643,9 @@ void LBM::advance(
     }
 
     collide(lev);
+    
+    // Safety check AFTER collision - clamp negative component densities to zero
+    clamp_negative_component_densities(lev);
 }
 
 void LBM::post_time_step()
@@ -694,6 +706,48 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
     amrex::MultiFab::Copy(
         fs[lev], f_star, 0, 0, constants::N_MICRO_STATES, fs[lev].nGrowVect());
     fs[lev].FillBoundary(Geom(lev).periodicity());
+}
+
+// Clamp negative component densities to zero
+void LBM::clamp_negative_component_densities(const int lev)
+{
+    BL_PROFILE("LBM::clamp_negative_component_densities()");
+    
+    // Component lattices can develop negative populations through:
+    // 1. Streaming - when cells with zero density stream from boundary ghost cells,
+    //    floating point errors can create small negatives
+    // 2. Collision - relaxation of near-zero density toward equilibrium can produce negatives
+    // 
+    // Unlike m_f and m_g which are always initialized with positive equilibrium distributions,
+    // component lattices start with zeros in most of the domain and only gain mass through
+    // initial conditions in specific regions. This makes them susceptible to negative values
+    // during streaming and collision operations.
+    //
+    // This clamp runs on ALL cells (interior, ghost, solid) to prevent negatives from
+    // propagating between timesteps via ghost cells.
+    
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+        
+        amrex::ParallelFor(
+            m_component_lattices[c][lev],
+            m_component_lattices[c][lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // Compute total density
+                amrex::Real rho_comp = 0.0;
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    rho_comp += f_comp_arrs[nbx](i, j, k, q);
+                }
+                
+                // Zero out all populations if total density is negative
+                if (rho_comp < 0.0) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
 }
 
 // Collide the particles
@@ -2511,8 +2565,20 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     // remain at zero or their initial state, not be "refilled" from neighbors.
     // Spilling (when cells become solid) is still performed above to conserve mass.
     //
-    // Note: Component lattices are already zeroed out in solid regions by the
-    // "Reset populations in ALL solid cells" step below.
+    // Explicitly zero out component lattices in newly fluid cells
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+        auto const& newly_fluid_arrs = newly_fluid.const_arrays();
+        
+        amrex::ParallelFor(
+            m_component_lattices[c][lev], amrex::IntVect(0), constants::N_MICRO_STATES,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
+                if (newly_fluid_arrs[nbx](i, j, k, 0) == 1) {
+                    f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
 
     } // End of refill block
 
@@ -2579,31 +2645,6 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
-
-    // Step 10: Safety check - clamp negative component densities to zero
-    // Check if rho_0 (sum of all populations) is negative and zero out if so
-    for (int c = 0; c < m_n_components; ++c) {
-        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
-        
-        amrex::ParallelFor(
-            m_component_lattices[c][lev],
-            m_component_lattices[c][lev].nGrowVect(),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Compute rho_0 as sum of all populations
-                amrex::Real rho_comp = 0.0;
-                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                    rho_comp += f_comp_arrs[nbx](i, j, k, q);
-                }
-                
-                // If total density is negative, zero out all populations
-                if (rho_comp < 0.0) {
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                }
-            });
-        amrex::Gpu::synchronize();
-    }
 }
 
 void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)

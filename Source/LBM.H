@@ -152,6 +152,9 @@ public:
     // put together an array of multifabs for writing
     amrex::Vector<const amrex::MultiFab*> plot_file_mf();
 
+    // clamp negative component densities to zero
+    void clamp_negative_component_densities(const int lev);
+
 private:
     // read parameters
     void read_parameters();
