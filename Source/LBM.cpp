@@ -955,8 +955,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         const amrex::Real wt = weight[q];
                         const auto& ev = evs[q];
                         amrex::Real eq_val = set_extended_equilibrium_value(
-                            rho_total, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, wt, ev);
-                        amrex::Real eq_comp = Y_k * eq_val;
+                            rho_comp, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, wt, ev);
+                        amrex::Real eq_comp = eq_val;//Y_k * eq_val;
                         f_comp_arr(iv, q) +=
                             omega_comp * (eq_comp - f_comp_arr(iv, q));
                     }
@@ -2505,183 +2505,14 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         });
     amrex::Gpu::synchronize();
 
-    // Refill for components
-    for (int c = 0; c < m_n_components; ++c) {
-        auto const& newly_fluid_arrs = newly_fluid.const_arrays();
-        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
-        auto const& old_fluid_arrs = old_is_fluid.const_arrays();
-        auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
-        auto const& donor_count_arrs = donor_recipient_count.arrays();
-
-        const stencil::Stencil stencil;
-        const auto& evs = stencil.evs;
-
-        // Pass 2 equivalent: Transfer
-        amrex::ParallelFor(
-            m_component_lattices[c][lev], amrex::IntVect(0),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Only process newly fluid cells
-                if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
-
-                // Get bounds for safety
-                const auto& farr = f_comp_arrs[nbx];
-                const auto lo = amrex::lbound(farr);
-                const auto hi = amrex::ubound(farr);
-
-                // Recompute the normal direction (same as first pass)
-                amrex::Real normal_x = 0.0;
-                amrex::Real normal_y = 0.0;
-                amrex::Real normal_z = 0.0;
-                int num_persistent = 0;
-
-                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                    int ni = i + evs[nq][0];
-                    int nj = j + evs[nq][1];
-                    int nk = k + evs[nq][2];
-
-                    if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
-                        nk < lo.z || nk > hi.z)
-                        continue;
-
-                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](
-                            ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
-                        normal_x += evs[nq][0];
-                        normal_y += evs[nq][1];
-                        normal_z += evs[nq][2];
-                        num_persistent++;
-                    }
-                }
-
-                if (num_persistent == 0) {
-                    // No persistent neighbors - initialize to zero
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                    return;
-                }
-
-                // Normalize the normal vector
-                amrex::Real norm = std::sqrt(
-                    normal_x * normal_x + normal_y * normal_y +
-                    normal_z * normal_z);
-                if (norm < 1e-12) {
-                    // Fallback: use first persistent neighbor
-                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                        int ni = i + evs[nq][0];
-                        int nj = j + evs[nq][1];
-                        int nk = k + evs[nq][2];
-
-                        if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
-                            nk < lo.z || nk > hi.z)
-                            continue;
-
-                        if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                            curr_fluid_arrs[nbx](
-                                ni, nj, nk, lbm::constants::IS_FLUID_IDX) ==
-                                1) {
-
-                            int n_recipients =
-                                donor_count_arrs[nbx](ni, nj, nk, 0);
-                            // Scale = 1/N to conserve mass (donor gives away
-                            // everything)
-                            amrex::Real scale = 1.0 / amrex::Real(n_recipients);
-
-                            // Recipient gets ONLY q=0 component (mass/energy at
-                            // rest)
-                            f_comp_arrs[nbx](i, j, k, 0) =
-                                f_comp_arrs[nbx](ni, nj, nk, 0) * scale;
-
-                            // All other components are zero (no momentum or
-                            // heat flux)
-                            for (int q = 1; q < constants::N_MICRO_STATES;
-                                 ++q) {
-                                f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                            }
-                            return;
-                        }
-                    }
-                    // No valid neighbor found
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                    return;
-                }
-
-                // Find neighbor with maximum dot product with normal
-                amrex::Real max_dot = -1e10;
-                int donor_i = -1;
-                int donor_j = -1;
-                int donor_k = -1;
-
-                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                    int ni = i + evs[nq][0];
-                    int nj = j + evs[nq][1];
-                    int nk = k + evs[nq][2];
-
-                    if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
-                        nk < lo.z || nk > hi.z)
-                        continue;
-
-                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](
-                            ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
-
-                        amrex::Real dot = evs[nq][0] * normal_x +
-                                          evs[nq][1] * normal_y +
-                                          evs[nq][2] * normal_z;
-
-                        if (dot > max_dot) {
-                            max_dot = dot;
-                            donor_i = ni;
-                            donor_j = nj;
-                            donor_k = nk;
-                        }
-                    }
-                }
-
-                // Transfer ONLY q=0 component with proper conservation
-                if (donor_i >= 0) {
-                    int n_recipients =
-                        donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0);
-                    // Scale = 1/N to conserve mass (donor gives away
-                    // everything)
-                    amrex::Real scale = 1.0 / amrex::Real(n_recipients);
-
-                    // Recipient gets ONLY q=0 component (mass/energy at rest)
-                    f_comp_arrs[nbx](i, j, k, 0) =
-                        f_comp_arrs[nbx](donor_i, donor_j, donor_k, 0) * scale;
-
-                    // All other components are zero (no momentum or heat flux)
-                    for (int q = 1; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                } else {
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                }
-            });
-        amrex::Gpu::synchronize();
-
-        // Pass 3 equivalent: Reduce donor
-        amrex::ParallelFor(
-            m_component_lattices[c][lev], amrex::IntVect(0),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Check if this cell is a donor (has recipients)
-                int n_recipients = donor_count_arrs[nbx](i, j, k, 0);
-                if (n_recipients == 0) return;
-
-                // Check if this cell is still fluid (donors must be fluid)
-                if (curr_fluid_arrs[nbx](
-                        i, j, k, lbm::constants::IS_FLUID_IDX) != 1)
-                    return;
-
-                // Donor gives away ALL of q=0
-                f_comp_arrs[nbx](i, j, k, 0) = 0.0;
-            });
-        amrex::Gpu::synchronize();
-    }
+    // Refill for components: DISABLED
+    // For passive scalars/tracers, refilling is not physically meaningful.
+    // When cells become fluid (e.g., as a moving body rotates away), they should
+    // remain at zero or their initial state, not be "refilled" from neighbors.
+    // Spilling (when cells become solid) is still performed above to conserve mass.
+    //
+    // Note: Component lattices are already zeroed out in solid regions by the
+    // "Reset populations in ALL solid cells" step below.
 
     } // End of refill block
 
@@ -2743,8 +2574,36 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     
     // Step 9: Fill boundary cells for updated data
     m_f[lev].FillBoundary(Geom(lev).periodicity());
+    for (int i = 0; i < m_n_components; ++i) {
+        m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
+    }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+
+    // Step 10: Safety check - clamp negative component densities to zero
+    // Check if rho_0 (sum of all populations) is negative and zero out if so
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+        
+        amrex::ParallelFor(
+            m_component_lattices[c][lev],
+            m_component_lattices[c][lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // Compute rho_0 as sum of all populations
+                amrex::Real rho_comp = 0.0;
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    rho_comp += f_comp_arrs[nbx](i, j, k, q);
+                }
+                
+                // If total density is negative, zero out all populations
+                if (rho_comp < 0.0) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
 }
 
 void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
