@@ -28,27 +28,123 @@ struct Constant
 
         int model_type = 1;
 
+        // Shape parameters
+        int region_type{0}; // 0 = all, 1 = sphere, 2 = cylinder
+        amrex::RealVect region_center = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+        amrex::Real region_radius{1.0};
+        amrex::Real cylinder_height{1.0};
+        int cylinder_dir{2}; // 0 = x, 1 = y, 2 = z
+        amrex::Real outside_density{0.0};
+
         AMREX_GPU_DEVICE
         void operator()(
-            const amrex::IntVect& /*iv*/,
-            amrex::GeometryData const& /*geom*/,
+            const amrex::IntVect& iv,
+            amrex::GeometryData const& geom,
             amrex::Real& rho,
             amrex::RealVect& vel) const
         {
-            rho = density;
+            const amrex::Real* prob_lo = geom.ProbLo();
+            const amrex::Real* dx = geom.CellSize();
+            const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
+            const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
+            const amrex::Real z =
+                AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
+
+            bool is_inside = true;
+            if (region_type == 1) { // sphere
+                const amrex::Real r2 =
+                    AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
+                                 + (y - region_center[1]) * (y - region_center[1]),
+                                 + (z - region_center[2]) * (z - region_center[2]));
+                if (r2 > region_radius * region_radius) {
+                    is_inside = false;
+                }
+            } else if (region_type == 2) { // cylinder
+                amrex::Real r2 = 0.0;
+                amrex::Real h = 0.0;
+                if (cylinder_dir == 0) {
+                    r2 = AMREX_D_TERM(0.0,
+                                      + (y - region_center[1]) * (y - region_center[1]),
+                                      + (z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(x - region_center[0]);
+                } else if (cylinder_dir == 1) {
+                    r2 = AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
+                                      + 0.0,
+                                      + (z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(y - region_center[1]);
+                } else {
+                    r2 = (x - region_center[0]) * (x - region_center[0]) +
+                         (y - region_center[1]) * (y - region_center[1]);
+                    h = AMREX_D_PICK(0.0, 0.0, std::abs(z - region_center[2]));
+                }
+                if (r2 > region_radius * region_radius ||
+                    h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            }
+
+            if (is_inside) {
+                rho = density;
+            } else {
+                rho = outside_density;
+            }
             vel = velocity;
         }
 
         AMREX_GPU_DEVICE void thermal_initialize(
-            const amrex::IntVect& /*iv*/,
-            amrex::GeometryData const& /*geom*/,
+            const amrex::IntVect& iv,
+            amrex::GeometryData const& geom,
             amrex::Real& rho,
             amrex::RealVect& vel,
             amrex::Real& temperature,
             amrex::Real& R,
             amrex::Real& gamma) const
         {
-            rho = density;
+            const amrex::Real* prob_lo = geom.ProbLo();
+            const amrex::Real* dx = geom.CellSize();
+            const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
+            const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
+            const amrex::Real z =
+                AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
+
+            bool is_inside = true;
+            if (region_type == 1) { // sphere
+                const amrex::Real r2 =
+                    AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
+                                 + (y - region_center[1]) * (y - region_center[1]),
+                                 + (z - region_center[2]) * (z - region_center[2]));
+                if (r2 > region_radius * region_radius) {
+                    is_inside = false;
+                }
+            } else if (region_type == 2) { // cylinder
+                amrex::Real r2 = 0.0;
+                amrex::Real h = 0.0;
+                if (cylinder_dir == 0) {
+                    r2 = AMREX_D_TERM(0.0,
+                                      + (y - region_center[1]) * (y - region_center[1]),
+                                      + (z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(x - region_center[0]);
+                } else if (cylinder_dir == 1) {
+                    r2 = AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
+                                      + 0.0,
+                                      + (z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(y - region_center[1]);
+                } else {
+                    r2 = (x - region_center[0]) * (x - region_center[0]) +
+                         (y - region_center[1]) * (y - region_center[1]);
+                    h = AMREX_D_PICK(0.0, 0.0, std::abs(z - region_center[2]));
+                }
+                if (r2 > region_radius * region_radius ||
+                    h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            }
+
+            if (is_inside) {
+                rho = density;
+            } else {
+                rho = outside_density;
+            }
             vel = velocity;
 
             temperature = initial_temperature;

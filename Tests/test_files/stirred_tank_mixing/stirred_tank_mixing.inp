@@ -24,7 +24,7 @@ lbm.dt_outer = 1.0
 lbm.nu = 0.008
 lbm.alpha = 0.008
 lbm.n_components = 1
-lbm.diffusivity_component_0 = 0.008
+lbm.diffusivity_component_0 = 0.0008
 lbm.initial_temperature = 0.03333
 lbm.adiabatic_exponent = 1.4
 lbm.save_streaming = 0
@@ -48,7 +48,12 @@ ic_constant.initial_temperature = 0.03333
 ic_constant.adiabatic_exponent = 1.4
 
 ic_constant_component_0.mach_components = 0.0 0.0 0.0
-ic_constant_component_0.density = 0.10
+# Region initialization example: (region_type: "all", "sphere", "cylinder")
+ic_constant_component_0.region_type = "sphere"
+ic_constant_component_0.region_center = 90.0 64.0 16.0
+ic_constant_component_0.region_radius = 10.0
+ic_constant_component_0.density = 1.0
+ic_constant_component_0.outside_density = 0.0
 ic_constant_component_0.initial_temperature = 0.03333
 
 # Boundary conditions for component 0 (if using constant/channel/parabolic BCs)
