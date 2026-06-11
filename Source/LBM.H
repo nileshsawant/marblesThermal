@@ -380,6 +380,9 @@ private:
     // User-input quantities (will be overridden by ParmParse)
     amrex::Real m_dx_outer = 1.0;
     amrex::Real m_dt_outer = 1.0;
+    amrex::Real m_dx_phys = 1.0;
+    amrex::Real m_dt_phys = 1.0;
+    amrex::Vector<amrex::Real> m_gravity = {0.0, 0.0, 0.0};
     amrex::Real m_nu = 1.0;
     amrex::Real m_alpha = 1.0;
     int m_n_components = 0;
@@ -410,7 +413,7 @@ private:
 public:
     /// Apply bubble-to-fluid body force via He-Luo forcing scheme.
     /// force_mf: 3-component body force density in LB units (force/vol).
-    void apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf);
+    void apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf);
 
     /// Apply bubble O2 source to the dissolved-O2 component lattice.
     /// o2_src_mf: 1-component source rate in mol/(m³·s).

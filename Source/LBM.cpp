@@ -312,6 +312,16 @@ void LBM::read_parameters()
         pp.query("nu", m_nu);
         m_alpha = m_nu;
         pp.query("alpha", m_alpha);
+    {
+        amrex::ParmParse pp_lbm("lbm");
+        // Read actual SI values (meters, seconds)
+        pp_lbm.query("dx_phys", m_dx_phys);
+        pp_lbm.query("dt_phys", m_dt_phys);
+        // Also support dt_lev for backwards compatibility
+        pp_lbm.query("dt_lev", m_dt_phys);
+    }
+
+        pp.queryarr("gravity", m_gravity, 0, AMREX_SPACEDIM);
 
         m_component_diffusivities.resize(m_n_components);
         for (int i = 0; i < m_n_components; ++i) {
@@ -455,16 +465,9 @@ void LBM::read_parameters()
         // Physical unit conversions — must be set explicitly in input file.
         // lbm.dx_outer and lbm.dt_outer are dimensionless LB units (= 1.0);
         // dx_phys and dt_lev must be the actual SI values.
-        m_bubble_params.dx_phys = m_dx_outer;  // overridden below if lbm.dx_phys provided
-        m_bubble_params.dt_lev = m_dt_outer;  // overridden below if lbm.dt_lev provided
+        m_bubble_params.dx_phys = m_dx_phys;
+        m_bubble_params.dt_phys = m_dt_phys;
         m_bubble_params.nu_lb   = m_nu;
-        {
-            amrex::ParmParse pp_lbm("lbm");
-            // Read actual SI values (meters, seconds) — REQUIRED for physical accuracy.
-            // dx_phys = physical cell size [m];  dt_lev = physical time step [s].
-            pp_lbm.query("dx_phys", m_bubble_params.dx_phys);
-            pp_lbm.query("dt_lev", m_bubble_params.dt_lev);
-        }
 
         // Concentration reference scale: 1 LB_rho ≡ m_bubble_o2_C_ref mol/m³
         {
@@ -476,7 +479,7 @@ void LBM::read_parameters()
 
         amrex::Print() << "[BubbleManager] Bubble physics enabled.\n"
                        << "  dx_phys = " << m_bubble_params.dx_phys << " m\n"
-                       << "  dt_lev = " << m_bubble_params.dt_lev << " s\n"
+                       << "  dt_lev = " << m_bubble_params.dt_phys << " s\n"
                        << "  O2 C_ref = " << m_bubble_o2_C_ref << " mol/m3 per LB_rho\n";
     }
 }
@@ -932,7 +935,7 @@ void LBM::advance(
     // ------------------------------------------------------------------
     if (m_enable_bubbles && lev == 0) {
         // Physical time in seconds (m_ts_new is in LB steps, dt_lev is s/step)
-        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_lev;
+        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_phys;
 
         // Temporary MultiFabs for bubble↔fluid coupling (zeroed each step)
         amrex::MultiFab bubble_force(
@@ -944,7 +947,7 @@ void LBM::advance(
 
         // Sparger injection (every step)
         // Must pass physical seconds per step, not the dimensionless LB m_dt_outer.
-        m_bubbles.inject_bubbles(m_bubble_params.dt_lev);
+        m_bubbles.inject_bubbles(m_bubble_params.dt_phys);
 
         // Determine O2 concentration MultiFab (component 0 if available)
         // A valid kLa run requires at least 1 component for dissolved O2.
@@ -1010,7 +1013,7 @@ void LBM::advance(
                            << "  max|Fy|=" << Fy_max
                            << "  max|Fz|=" << Fz_max << "\n";
         }
-        apply_bubble_body_force(lev, bubble_force);
+        apply_macroscopic_forcing(lev, &bubble_force);
 
         // Apply O2 source to component-0 lattice
         if (m_n_components > 0) {
@@ -1035,8 +1038,14 @@ void LBM::advance(
             m_isteps[lev] % m_bubble_params.stats_int == 0) {
             m_bubbles.write_stats(m_isteps[lev], phys_time);
         }
+    } else {
+        // No bubbles: just apply gravity
+        if (m_gravity[0] != 0.0 || m_gravity[1] != 0.0 || m_gravity[2] != 0.0) {
+            apply_macroscopic_forcing(lev, nullptr);
+        }
     }
 }
+
 
 void LBM::post_time_step()
 {
@@ -5782,9 +5791,9 @@ void LBM::advance_phi(const int lev)
 // ============================================================================
 namespace lbm {
 
-void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
+void LBM::apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf)
 {
-    BL_PROFILE("LBM::apply_bubble_body_force()");
+    BL_PROFILE("LBM::apply_macroscopic_forcing()");
 
     const stencil::Stencil stencil;
     const auto& evs    = stencil.evs;
@@ -5797,10 +5806,25 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
     const amrex::Real dt             = m_dts[lev];
 
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
-    auto const& force_arrs    = force_mf.const_arrays();
+    
+    // Check if extra multi-fab forcing exists
+    bool has_extra = (force_mf != nullptr);
+    amrex::MultiArray4<const amrex::Real> force_arrs;
+    if (has_extra) {
+        force_arrs = force_mf->const_arrays();
+    }
+
+    // Precalculate gravity in dimensionless LB units
+    // g_LB = g_phys * dt_phys^2 / dx_phys
+    const amrex::Real grav_LB_x = m_gravity[0] * m_dt_phys * m_dt_phys / m_dx_phys;
+    const amrex::Real grav_LB_y = m_gravity[1] * m_dt_phys * m_dt_phys / m_dx_phys;
+    const amrex::Real grav_LB_z = m_gravity[2] * m_dt_phys * m_dt_phys / m_dx_phys;
+
     auto const& f_arrs        = m_f[lev].arrays();
+    auto const& g_arrs        = m_g[lev].arrays();
     auto const& md_arrs       = m_macrodata[lev].const_arrays();
     auto const& d_arrs        = m_derived[lev].const_arrays();
+    auto const& ct_arrs       = m_cell_type[lev].const_arrays();
 
     amrex::ParallelFor(
         m_f[lev], amrex::IntVect(0),
@@ -5810,16 +5834,48 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
                 return;
             }
 
-            const amrex::Real Fx = force_arrs[nbx](iv, 0);
-            const amrex::Real Fy = force_arrs[nbx](iv, 1);
-            const amrex::Real Fz = force_arrs[nbx](iv, 2);
-            if (Fx == 0.0 && Fy == 0.0 && Fz == 0.0) { return; }
+            // Exclude interface cells from macroscopic forcing to prevent acoustic
+            // shocks and instability at the FSLBM boundary (Donath 2011, p122).
+            if (ct_arrs[nbx](iv, 0) == lbm::constants::CELL_INTERFACE) {
+                return;
+            }
 
             const auto md_arr = md_arrs[nbx];
             const auto d_arr  = d_arrs[nbx];
 
             const amrex::Real rho = md_arr(iv, constants::RHO_IDX);
             if (rho < 1.0e-12) { return; }
+
+            amrex::Real Fx = rho * grav_LB_x;
+            amrex::Real Fy = rho * grav_LB_y;
+            amrex::Real Fz = rho * grav_LB_z;
+            
+            if (has_extra) {
+                // The force field generated by BubbleManager is an acceleration
+                // (dimensionless velocity shift) normalized to the pure liquid density.
+                // Scale by the local phase fraction (rho) to yield a valid force density
+                // and perfectly cancel the 1/rho singularity in the He-Luo forcing step.
+                
+                amrex::Real bFx = force_arrs[nbx](iv, 0);
+                amrex::Real bFy = force_arrs[nbx](iv, 1);
+                amrex::Real bFz = force_arrs[nbx](iv, 2);
+                
+                // Point-particle aggregation at solid boundaries (underside of impeller)
+                // can unphysically concentrate 1000x displaced volume into a single cell.
+                // Clamp the maximum bubble-induced acceleration to 50x physical gravity
+                // to prevent the Eulerian solver from shattering at Mach > 1.0.
+                const amrex::Real g_mag = std::sqrt(grav_LB_x*grav_LB_x + grav_LB_y*grav_LB_y + grav_LB_z*grav_LB_z);
+                const amrex::Real cap = amrex::max(g_mag * 50.0, 1.0e-4);
+                
+                bFx = amrex::min(amrex::max(bFx, -cap), cap);
+                bFy = amrex::min(amrex::max(bFy, -cap), cap);
+                bFz = amrex::min(amrex::max(bFz, -cap), cap);
+
+                Fx += rho * bFx;
+                Fy += rho * bFy;
+                Fz += rho * bFz;
+            }
+            if (Fx == 0.0 && Fy == 0.0 && Fz == 0.0) { return; }
 
             const amrex::Real ux = md_arr(iv, constants::VELX_IDX);
             const amrex::Real uy = md_arr(iv, constants::VELY_IDX);
@@ -5866,14 +5922,41 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             const amrex::RealVect vel0 = {AMREX_D_DECL(ux,  uy,  uz )};
             const amrex::RealVect vel1 = {AMREX_D_DECL(ux1, uy1, uz1)};
 
+            const amrex::Real cv = spec_gas_const / (l_gamma - 1.0);
+            
+            const amrex::Real two_rho_e0 = get_energy(temperature, rho, vel0, cv);
+            const amrex::Real two_rho_e1 = get_energy(temperature, rho, vel1, cv);
+
+            amrex::Real rxx_eq0(0.0), ryy_eq0(0.0), rzz_eq0(0.0), rxy_eq0(0.0), rxz_eq0(0.0), ryz_eq0(0.0);
+            amrex::RealVect heat_flux_0 = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+            get_equilibrium_moments(rho, vel0, two_rho_e0, cv, spec_gas_const, heat_flux_0,
+                                    rxx_eq0, ryy_eq0, rzz_eq0, rxy_eq0, rxz_eq0, ryz_eq0);
+            amrex::GpuArray<amrex::Real, 6> hf_flux_0 = {rxx_eq0, ryy_eq0, rzz_eq0, rxy_eq0, rxz_eq0, ryz_eq0};
+
+            amrex::Real rxx_eq1(0.0), ryy_eq1(0.0), rzz_eq1(0.0), rxy_eq1(0.0), rxz_eq1(0.0), ryz_eq1(0.0);
+            amrex::RealVect heat_flux_1 = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+            get_equilibrium_moments(rho, vel1, two_rho_e1, cv, spec_gas_const, heat_flux_1,
+                                    rxx_eq1, ryy_eq1, rzz_eq1, rxy_eq1, rxz_eq1, ryz_eq1);
+            amrex::GpuArray<amrex::Real, 6> hf_flux_1 = {rxx_eq1, ryy_eq1, rzz_eq1, rxy_eq1, rxz_eq1, ryz_eq1};
+
+            const amrex::RealVect zero_vec = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+            const amrex::Real l_theta0 = stencil::Stencil::THETA0;
+
             for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                 const auto& ev = evs[q];
                 const amrex::Real wt = weight[q];
+                
                 const amrex::Real feq0 = set_extended_equilibrium_value(
                     rho, vel0, pxx_0, pyy_0, pzz_0, l_mesh_speed, wt, ev);
                 const amrex::Real feq1 = set_extended_equilibrium_value(
                     rho, vel1, pxx_1, pyy_1, pzz_1, l_mesh_speed, wt, ev);
                 f_arrs[nbx](iv, q) += feq1 - feq0;
+                
+                const amrex::Real geq0 = set_extended_grad_expansion_generic(
+                    two_rho_e0, heat_flux_0, hf_flux_0, l_mesh_speed, wt, ev, l_theta0, zero_vec, 1.0);
+                const amrex::Real geq1 = set_extended_grad_expansion_generic(
+                    two_rho_e1, heat_flux_1, hf_flux_1, l_mesh_speed, wt, ev, l_theta0, zero_vec, 1.0);
+                g_arrs[nbx](iv, q) += geq1 - geq0;
             }
         });
     // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
@@ -5897,7 +5980,7 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
     if (m_n_components < 1) { return; }
 
     // Conversion: [mol/(m³·s)] * dt_lev [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
-    const amrex::Real conv = m_bubble_params.dt_lev / m_bubble_o2_C_ref;
+    const amrex::Real conv = m_bubble_params.dt_phys / m_bubble_o2_C_ref;
 
     const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     const amrex::Real l_mesh_speed          = m_mesh_speed;
@@ -6507,15 +6590,15 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) { return; }
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ob[nbx](i, j, k, q);
-                // For CELL_LIQUID: only clamp NaN/Inf (finite spill deposits
-                // should dissipate naturally via streaming, not be clamped).
-                // For CELL_INTERFACE: clamp if rho > ceiling (ABB amplification
-                // risk).  !(rho <= ceil) also catches NaN.
+                // For CELL_INTERFACE: clamp if rho > 5*rho_ref (ABB amplification risk).
+                // For CELL_LIQUID: clamp if rho > 100*rho_ref (catches unphysical spikes like 9e9
+                // from numerical instabilities, while allowing natural transient spill deposits).
+                // Using (rho <= ceil) correctly evaluates to false for NaN, ensuring NaNs are repaired.
                 const bool is_interface = (ct == CELL_INTERFACE);
                 const amrex::Real rho_ceil = is_interface
                     ? rho_ceil_ifc
-                    : amrex::Real(1.0e30);  // only catches NaN/Inf for LIQUID
-                if (!(rho > rho_ceil)) { return; }
+                    : amrex::Real(5.0) * l_fslbm_rho_ref;
+                if (rho <= rho_ceil) { return; }
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
                 amrex::RealVect heat_flux_ob(AMREX_D_DECL(0, 0, 0));
                 const amrex::Real two_rho_e_ob = get_energy(

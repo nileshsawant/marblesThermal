@@ -96,6 +96,9 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
+# Physical macroscopic gravity (m/s^2) for the hydrostatic pressure field
+lbm.gravity = 0.0 0.0 -9.81
+
 lbm.nu    = 0.032   # effective LBM kinematic viscosity (includes Smagorinsky SGS)
 lbm.alpha = 0.032
 

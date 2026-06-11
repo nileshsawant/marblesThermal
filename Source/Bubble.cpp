@@ -795,7 +795,10 @@ void BubbleManager::advance(
                 amrex::Real Vb_new = n_O2_new * prms.O2_molar_volume;
                 if (Vb_new > 0.0) {
                     amrex::Real d_new_new = std::cbrt(6.0 * Vb_new / amrex::Math::pi<amrex::Real>());
-                    if (d_new_new < 1.0e-5) { p.id() = -1; }
+                    // If a bubble shrinks below the minimum resolved diameter, its drag
+                    // relaxation time tau_drag drops below dt_phys. Explicit Euler integration
+                    // of acceleration becomes unconditionally unstable (oscillatory explosion).
+                    if (d_new_new < prms.min_diameter) { p.id() = -1; }
                     else { p.rdata(BubbleIdx::DIAMETER) = d_new_new; }
                 } else { p.id() = -1; }
                 
@@ -816,50 +819,10 @@ void BubbleManager::advance(
                     amrex::Real new_py = py + (vby * prms.dt_phys + 0.5 * ay_new * prms.dt_phys * prms.dt_phys) / dx_phys;
                     amrex::Real new_pz = pz + (vbz * prms.dt_phys + 0.5 * az_new * prms.dt_phys * prms.dt_phys) / dx_phys;
                     
-                    p.rdata(BubbleIdx::VX) = vbx + ax_new * prms.dt_phys;
-                    p.rdata(BubbleIdx::VY) = vby + ay_new * prms.dt_phys;
-                    p.rdata(BubbleIdx::VZ) = vbz + az_new * prms.dt_phys;
                     
-                    if (has_isf) {
-                        int nci = static_cast<int>(amrex::Math::floor((new_px - prob_lo[0]) / dx_arr[0]));
-                        int ncj = static_cast<int>(amrex::Math::floor((new_py - prob_lo[1]) / dx_arr[1]));
-                        int nck = static_cast<int>(amrex::Math::floor((new_pz - prob_lo[2]) / dx_arr[2]));
-                        amrex::IntVect niv(AMREX_D_DECL(nci, ncj, nck));
-                        
-                        bool new_in_solid = (!domain.contains(niv) || isf_arr(niv, 0) == 0);
-                        if (new_in_solid) {
-                            amrex::IntVect oiv(AMREX_D_DECL(ci, cj, ck));
-                            bool old_in_solid = (!domain.contains(oiv) || isf_arr(oiv, 0) == 0);
-                            if (!old_in_solid) {
-                                new_px = old_x; new_py = old_y; new_pz = old_z;
-                                p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
-                                p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
-                            } else {
-                                bool found = false;
-                                for (int d_i = -1; d_i <= 1 && !found; ++d_i) {
-                                    for (int d_j = -1; d_j <= 1 && !found; ++d_j) {
-                                        for (int d_k = -1; d_k <= 1 && !found; ++d_k) {
-                                            amrex::IntVect nniv(AMREX_D_DECL(ci+d_i, cj+d_j, ck+d_k));
-                                            if (domain.contains(nniv) && isf_arr(nniv,0) == 1) {
-                                                new_px = (nniv[0] + 0.5) * dx_arr[0] + prob_lo[0];
-                                                new_py = (nniv[1] + 0.5) * dx_arr[1] + prob_lo[1];
-                                                new_pz = (nniv[2] + 0.5) * dx_arr[2] + prob_lo[2];
-                                                p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
-                                                p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
-                                                found = true;
-                                            }
-                                        }
-                                    }
-                                }
-                                if (!found) p.id() = -1;
-                            }
-                        }
-                    }
-                    p.pos(0) = new_px;
-                    p.pos(1) = new_py;
-                    p.pos(2) = new_pz;
-                    
-                    // 6. Free Surface Outgassing Exit
+                    // 5a. Free Surface Outgassing Exit (MUST happen before solid collision check,
+                    // otherwise bubbles bounce off the FSLBM gas cells which are marked as IS_FLUID=0)
+                    bool bubble_exited = false;
                     if (has_phi) {
                         int fsi = static_cast<int>(amrex::Math::floor((new_px - prob_lo[0]) / dx_arr[0]));
                         int fsj = static_cast<int>(amrex::Math::floor((new_py - prob_lo[1]) / dx_arr[1]));
@@ -867,9 +830,58 @@ void BubbleManager::advance(
                         amrex::IntVect fsiv(AMREX_D_DECL(fsi, fsj, fsk));
                         if (domain.contains(fsiv) && phi_arr(fsiv, 0) < 0.5) {
                             p.id() = -1;
+                            bubble_exited = true;
                         }
                     } else {
-                        if (new_pz >= prms.free_surface_z) { p.id() = -1; }
+                        if (new_pz >= prms.free_surface_z) { 
+                            p.id() = -1; 
+                            bubble_exited = true;
+                        }
+                    }
+                    
+                    if (!bubble_exited) {
+                        p.rdata(BubbleIdx::VX) = vbx + ax_new * prms.dt_phys;
+                        p.rdata(BubbleIdx::VY) = vby + ay_new * prms.dt_phys;
+                        p.rdata(BubbleIdx::VZ) = vbz + az_new * prms.dt_phys;
+                        
+                        if (has_isf) {
+                            int nci = static_cast<int>(amrex::Math::floor((new_px - prob_lo[0]) / dx_arr[0]));
+                            int ncj = static_cast<int>(amrex::Math::floor((new_py - prob_lo[1]) / dx_arr[1]));
+                            int nck = static_cast<int>(amrex::Math::floor((new_pz - prob_lo[2]) / dx_arr[2]));
+                            amrex::IntVect niv(AMREX_D_DECL(nci, ncj, nck));
+                            
+                            bool new_in_solid = (!domain.contains(niv) || isf_arr(niv, 0) == 0);
+                            if (new_in_solid) {
+                                amrex::IntVect oiv(AMREX_D_DECL(ci, cj, ck));
+                                bool old_in_solid = (!domain.contains(oiv) || isf_arr(oiv, 0) == 0);
+                                if (!old_in_solid) {
+                                    new_px = old_x; new_py = old_y; new_pz = old_z;
+                                    p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
+                                    p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
+                                } else {
+                                    bool found = false;
+                                    for (int d_i = -1; d_i <= 1 && !found; ++d_i) {
+                                        for (int d_j = -1; d_j <= 1 && !found; ++d_j) {
+                                            for (int d_k = -1; d_k <= 1 && !found; ++d_k) {
+                                                amrex::IntVect nniv(AMREX_D_DECL(ci+d_i, cj+d_j, ck+d_k));
+                                                if (domain.contains(nniv) && isf_arr(nniv,0) == 1) {
+                                                    new_px = (nniv[0] + 0.5) * dx_arr[0] + prob_lo[0];
+                                                    new_py = (nniv[1] + 0.5) * dx_arr[1] + prob_lo[1];
+                                                    new_pz = (nniv[2] + 0.5) * dx_arr[2] + prob_lo[2];
+                                                    p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
+                                                    p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
+                                                    found = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (!found) p.id() = -1;
+                                }
+                            }
+                        }
+                        p.pos(0) = new_px;
+                        p.pos(1) = new_py;
+                        p.pos(2) = new_pz;
                     }
                 }
             });
