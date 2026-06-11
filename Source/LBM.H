@@ -382,9 +382,9 @@ private:
     amrex::Real m_dt_outer = 1.0;
     amrex::Real m_dx_phys = 1.0;
     amrex::Real m_dt_phys = 1.0;
-    amrex::Vector<amrex::Real> m_gravity = {0.0, 0.0, 0.0};
     amrex::Real m_nu = 1.0;
     amrex::Real m_alpha = 1.0;
+    amrex::Vector<amrex::Real> m_gravity{AMREX_D_DECL(0.0, 0.0, 0.0)};
     int m_n_components = 0;
     amrex::Vector<amrex::Real> m_component_diffusivities;
 
