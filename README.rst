@@ -40,7 +40,7 @@ first 10 seconds of a stirred-tank kLa case from
 
 .. image:: Docs/sphinx/figs/kla_bioreactor_10s.gif
    :alt: kLa bioreactor simulation, first 10 seconds
-   :width: 480
+   :width: 640
 
 Getting Started
 ~~~~~~~~~~~~~~~
